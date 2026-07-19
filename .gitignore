@@ -1,0 +1,16 @@
+# Track only source files and markdown files
+*
+
+# Keep git metadata and this file
+!.gitignore
+
+# Keep directories so allow rules can apply inside
+!*/
+
+# Source tree
+!Source/
+!Source/**
+
+# Markdown docs anywhere
+!*.md
+!**/*.md
