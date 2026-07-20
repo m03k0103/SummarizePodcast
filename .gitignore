@@ -14,3 +14,11 @@
 # Markdown docs anywhere
 !*.md
 !**/*.md
+
+# Runtime/generated artifacts
+Output/
+Source/**/__pycache__/
+Source/**/*.py[cod]
+Source/**/*.log
+Source/**/*.tmp
+Source/**/*.mp3
