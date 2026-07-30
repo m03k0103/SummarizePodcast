@@ -97,12 +97,23 @@ def find_ffmpeg() -> str | None:
         if path:
             return path
 
+    home = Path.home()
+    extra_search_dirs = [
+        home / "OneDrive" / "dev" / "ffmpeg",
+        Path(r"C:\Users\m03k0\OneDrive\dev\ffmpeg"),
+    ]
+
     start_dir = Path(__file__).resolve().parent
-    for current in [start_dir, *start_dir.parents]:
+    search_roots = [start_dir, *start_dir.parents, *extra_search_dirs]
+
+    for current in search_roots:
+        if not current.exists():
+            continue
         candidates = [
-            current / "ffmpeg" / "ffmpeg-master-latest-win64-gpl-shared" / "bin" / "ffmpeg.exe",
-            current / "ffmpeg-master-latest-win64-gpl-shared" / "bin" / "ffmpeg.exe",
+            current / "ffmpeg.exe",
             current / "bin" / "ffmpeg.exe",
+            current / "ffmpeg-master-latest-win64-gpl-shared" / "bin" / "ffmpeg.exe",
+            current / "ffmpeg" / "ffmpeg-master-latest-win64-gpl-shared" / "bin" / "ffmpeg.exe",
         ]
         for candidate in candidates:
             if candidate.exists():
@@ -306,9 +317,213 @@ def remove_boilerplate(text: str) -> str:
     return content.strip()
 
 
-def generate_english_summary(text: str, language: str, max_sentences: int = 3, ratio: float = 0.25) -> str:
+def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-2.0-flash") -> str:
+    import time
+    import urllib.error
+    model_path = model if model.startswith("models/") else f"models/{model}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
+    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+
+    max_retries = 3
+    backoff = 5
+    for attempt in range(max_retries):
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                candidates = data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", "").strip()
+                return ""
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < max_retries - 1:
+                print(f"Rate limit hit for {model_path}. Retrying in {backoff} seconds... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
+                time.sleep(backoff)
+                backoff *= 2
+            else:
+                print(f"Gemini API call failed ({model_path}): {exc}", file=sys.stderr)
+                break
+        except Exception as exc:
+            print(f"Gemini API call failed ({model_path}): {exc}", file=sys.stderr)
+            break
+    return ""
+
+
+def call_openai_api(prompt: str, api_key: str, model: str = "gpt-4o-mini", base_url: str = "https://api.openai.com/v1") -> str:
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    payload = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that summarizes podcasts accurately and clearly."},
+            {"role": "user", "content": prompt}
+        ]
+    }).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(url, data=payload, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+    except Exception as exc:
+        print(f"OpenAI API call failed: {exc}", file=sys.stderr)
+    return ""
+
+
+def call_ollama_api(prompt: str, model: str = "llama3", base_url: str = "http://localhost:11434") -> str:
+    url = f"{base_url.rstrip('/')}/api/generate"
+    payload = json.dumps({"model": model, "prompt": prompt, "stream": False}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("response", "").strip()
+    except Exception as exc:
+        print(f"Ollama API call failed: {exc}", file=sys.stderr)
+    return ""
+
+
+def summarize_with_llm(
+    text: str,
+    target_language: str,
+    provider: str = "auto",
+    gemini_key: str | None = None,
+    openai_key: str | None = None,
+    model: str | None = None,
+    openai_base_url: str | None = None,
+    ollama_base_url: str | None = None,
+) -> str | None:
+    cleaned = remove_boilerplate(text)
+    if not cleaned.strip():
+        return ""
+
+    if provider.lower() == "textrank":
+        return None
+
+    gemini_key = gemini_key or os.environ.get("GEMINI_API_KEY")
+    openai_key = openai_key or os.environ.get("OPENAI_API_KEY")
+
+    if not gemini_key and sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as reg_key:
+                val, _ = winreg.QueryValueEx(reg_key, "GEMINI_API_KEY")
+                if val:
+                    gemini_key = val
+        except Exception:
+            pass
+
+    active_provider = provider.lower()
+    if active_provider == "auto":
+        if gemini_key:
+            active_provider = "gemini"
+        elif openai_key:
+            active_provider = "openai"
+        else:
+            print("Notice: GEMINI_API_KEY / OPENAI_API_KEY not found. Falling back to TextRank summarizer.", file=sys.stderr)
+            return None
+
+    if target_language.lower().startswith("ja"):
+        prompt = (
+            "以下のポッドキャストの文字起こしテキストを読み、重要なポイントをわかりやすく要約してください。\n\n"
+            "# 要約フォーマットの指定:\n"
+            "## 概要\n"
+            "(全体のトピックと主旨を2〜3文で簡潔にまとめる)\n\n"
+            "## 主要ポイント\n"
+            "- (トピックや重要発言・議論内容を3〜5つの箇条書きでまとめる)\n\n"
+            "## 結論・まとめ\n"
+            "(エピソードの結論やリスナーへの示唆を1〜2文でまとめる)\n\n"
+            "--- 文字起こしテキスト ---\n"
+            f"{cleaned}"
+        )
+    else:
+        prompt = (
+            "Please read the following podcast transcript and generate a clear, structured summary in English.\n\n"
+            "# Required Format:\n"
+            "## Overview\n"
+            "(Summarize the main topic and purpose in 2-3 concise sentences)\n\n"
+            "## Key Takeaways\n"
+            "- (List 3-5 bullet points covering the key ideas, arguments, or discussions)\n\n"
+            "## Conclusion\n"
+            "(Summarize the conclusion or takeaway in 1-2 sentences)\n\n"
+            "--- Transcript ---\n"
+            f"{cleaned}"
+        )
+
+    if active_provider == "gemini":
+        if not gemini_key:
+            print("Gemini API key is required. Set GEMINI_API_KEY env var or pass --gemini-api-key.", file=sys.stderr)
+            return None
+        target_model = model or "gemini-flash-latest"
+        print(f"Summarizing using Gemini API ({target_model})...")
+        res = call_gemini_api(prompt, gemini_key, model=target_model)
+        if res:
+            return res
+        import time
+        for fallback_model in ["gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it"]:
+            if fallback_model == target_model:
+                continue
+            time.sleep(1)
+            print(f"Retrying with {fallback_model}...")
+            res = call_gemini_api(prompt, gemini_key, model=fallback_model)
+            if res:
+                return res
+
+    elif active_provider == "openai":
+        if not openai_key:
+            print("OpenAI API key is required. Set OPENAI_API_KEY env var or pass --openai-api-key.", file=sys.stderr)
+            return None
+        target_model = model or "gpt-4o-mini"
+        base_url = openai_base_url or "https://api.openai.com/v1"
+        print(f"Summarizing using OpenAI API ({target_model})...")
+        res = call_openai_api(prompt, openai_key, model=target_model, base_url=base_url)
+        if res:
+            return res
+
+    elif active_provider == "ollama":
+        target_model = model or "llama3"
+        base_url = ollama_base_url or "http://localhost:11434"
+        print(f"Summarizing using Ollama ({target_model})...")
+        res = call_ollama_api(prompt, model=target_model, base_url=base_url)
+        if res:
+            return res
+
+    return None
+
+
+def generate_english_summary(
+    text: str,
+    language: str,
+    max_sentences: int = 3,
+    ratio: float = 0.25,
+    llm_provider: str = "auto",
+    gemini_key: str | None = None,
+    openai_key: str | None = None,
+    llm_model: str | None = None,
+    openai_base_url: str | None = None,
+    ollama_base_url: str | None = None,
+) -> str:
     if not text.strip():
         return ""
+
+    # Try LLM summarization first
+    llm_res = summarize_with_llm(
+        text=text,
+        target_language="en",
+        provider=llm_provider,
+        gemini_key=gemini_key,
+        openai_key=openai_key,
+        model=llm_model,
+        openai_base_url=openai_base_url,
+        ollama_base_url=ollama_base_url,
+    )
+    if llm_res and llm_res.strip():
+        return llm_res.strip()
 
     cleaned_text = remove_boilerplate(text)
     if not cleaned_text.strip():
@@ -337,18 +552,41 @@ def generate_english_summary(text: str, language: str, max_sentences: int = 3, r
 
     translated_summary = translate_text(source_summary, source_language=source_language, target_language="en")
     if not translated_summary.strip():
-        # try chunked translation (safer for longer text)
         translated_summary = translate_text_in_chunks(source_summary, source_language=source_language, target_language="en")
     if translated_summary.strip():
         return translated_summary
 
-    # As a last resort, return the source-language summary.
     return source_summary
 
 
-def generate_japanese_summary(text: str, language: str, max_sentences: int = 3, ratio: float = 0.25) -> str:
+def generate_japanese_summary(
+    text: str,
+    language: str,
+    max_sentences: int = 3,
+    ratio: float = 0.25,
+    llm_provider: str = "auto",
+    gemini_key: str | None = None,
+    openai_key: str | None = None,
+    llm_model: str | None = None,
+    openai_base_url: str | None = None,
+    ollama_base_url: str | None = None,
+) -> str:
     if not text.strip():
         return ""
+
+    # Try LLM summarization first
+    llm_res = summarize_with_llm(
+        text=text,
+        target_language="ja",
+        provider=llm_provider,
+        gemini_key=gemini_key,
+        openai_key=openai_key,
+        model=llm_model,
+        openai_base_url=openai_base_url,
+        ollama_base_url=ollama_base_url,
+    )
+    if llm_res and llm_res.strip():
+        return llm_res.strip()
 
     cleaned_text = remove_boilerplate(text)
     if not cleaned_text.strip():
@@ -362,7 +600,7 @@ def generate_japanese_summary(text: str, language: str, max_sentences: int = 3, 
             summary = summarize_text(japanese_text, max_sentences=max_sentences, ratio=0.5)
         return summary
 
-    english_summary = generate_english_summary(text, language, max_sentences=max_sentences, ratio=ratio)
+    english_summary = generate_english_summary(text, language, max_sentences=max_sentences, ratio=ratio, llm_provider="textrank")
     if english_summary.strip():
         translated_summary = translate_text(english_summary, source_language="en", target_language="ja")
         if not translated_summary.strip():
@@ -539,7 +777,22 @@ def main() -> int:
     )
     parser.add_argument("--summary-sentences", type=int, default=0, help="Maximum number of sentences in the summary (0 = no maximum; use ratio only)")
     parser.add_argument("--summary-ratio", type=float, default=0.25, help="Target summary length ratio relative to input text by character length (0.2-0.3 recommended)")
+    parser.add_argument("--llm-provider", choices=["auto", "gemini", "openai", "ollama", "textrank"], default="auto", help="Summarizer provider: auto, gemini, openai, ollama, textrank (default: auto)")
+    parser.add_argument("--llm-model", default=None, help="LLM model name (e.g. gemini-2.5-flash, gpt-4o-mini, llama3)")
+    parser.add_argument("--gemini-api-key", default=None, help="Gemini API Key (or set GEMINI_API_KEY env var)")
+    parser.add_argument("--openai-api-key", default=None, help="OpenAI API Key (or set OPENAI_API_KEY env var)")
+    parser.add_argument("--openai-base-url", default=None, help="OpenAI API Base URL (default: https://api.openai.com/v1)")
+    parser.add_argument("--ollama-base-url", default=None, help="Ollama Base URL (default: http://localhost:11434)")
     args = parser.parse_args()
+
+    llm_kwargs = {
+        "llm_provider": args.llm_provider,
+        "gemini_key": args.gemini_api_key,
+        "openai_key": args.openai_api_key,
+        "llm_model": args.llm_model,
+        "openai_base_url": args.openai_base_url,
+        "ollama_base_url": args.ollama_base_url,
+    }
 
     if args.skip_download:
         transcript_path = Path(args.input)
@@ -551,11 +804,12 @@ def main() -> int:
         output_dir, output_base = resolve_output_base(args.output, transcript_path.stem)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        english_summary = generate_english_summary(transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio)
+        english_summary = generate_english_summary(
+            transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+        )
         if not english_summary:
             english_summary = "(Transcription is empty; summary could not be created.)"
         english_summary_path = output_dir / f"{output_base}.summary.en.txt"
-        # If translation failed and summary is not in English, annotate the file
         if not args.source_language.lower().startswith("en") and not is_mostly_english(english_summary):
             note = "(English translation unavailable; original summary in source language follows)\n\n"
             english_summary_path.write_text(note + english_summary, encoding="utf-8")
@@ -563,7 +817,9 @@ def main() -> int:
             english_summary_path.write_text(english_summary, encoding="utf-8")
         print(f"Saved English summary to: {english_summary_path}")
 
-        japanese_summary = generate_japanese_summary(transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio)
+        japanese_summary = generate_japanese_summary(
+            transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+        )
         if not japanese_summary:
             japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
         japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
@@ -607,11 +863,12 @@ def main() -> int:
     transcript_path.write_text(transcript_text, encoding="utf-8")
     print(f"Saved transcription to: {transcript_path}")
 
-    english_summary = generate_english_summary(transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio)
+    english_summary = generate_english_summary(
+        transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+    )
     if not english_summary:
         english_summary = "(Transcription is empty; summary could not be created.)"
     english_summary_path = output_dir / f"{output_base}.summary.en.txt"
-    # If translation failed and summary is not in English, annotate the file
     if not args.source_language.lower().startswith("en") and not is_mostly_english(english_summary):
         note = "(English translation unavailable; original summary in source language follows)\n\n"
         english_summary_path.write_text(note + english_summary, encoding="utf-8")
@@ -619,7 +876,9 @@ def main() -> int:
         english_summary_path.write_text(english_summary, encoding="utf-8")
     print(f"Saved English summary to: {english_summary_path}")
 
-    japanese_summary = generate_japanese_summary(transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio)
+    japanese_summary = generate_japanese_summary(
+        transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+    )
     if not japanese_summary:
         japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
     japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
