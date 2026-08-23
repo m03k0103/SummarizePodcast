@@ -1,24 +1,19 @@
-# Track only source files and markdown files
-*
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 
-# Keep git metadata and this file
-!.gitignore
+# Environment
+.venv/
+env/
+venv/
 
-# Keep directories so allow rules can apply inside
-!*/
+# Audio files & temporary downloads (Exclude binary mp3 files from git)
+*.mp3
+*.wav
+*.tmp
+*.log
 
-# Source tree
-!Source/
-!Source/**
-
-# Markdown docs anywhere
-!*.md
-!**/*.md
-
-# Runtime/generated artifacts
-Output/
-Source/**/__pycache__/
-Source/**/*.py[cod]
-Source/**/*.log
-Source/**/*.tmp
-Source/**/*.mp3
+# Keep Output directory text files for summaries
+!Output/
+!Output/*.txt
