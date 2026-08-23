@@ -760,12 +760,59 @@ def summarize_text(text: str, max_sentences: int = 0, ratio: float = 0.25) -> st
     return "\n".join(sentences[idx] for idx in selected)
 
 
+def fetch_episodes_from_podcast_url(url: str, count: int = 10) -> list[dict]:
+    """
+    ポッドキャストの URL から最新 N 件のエピソード情報を取得
+    戻り値: [{'title': ..., 'media_url': ..., 'uuid': ...}, ...]
+    """
+    uuid_match = re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', url, re.I)
+    if uuid_match:
+        podcast_uuid = uuid_match.group(0)
+        cache_api = f"https://cache.pocketcasts.com/podcast/full/{podcast_uuid}"
+        try:
+            req = urllib.request.Request(cache_api, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                content = resp.read()
+            try:
+                import gzip
+                data_str = gzip.decompress(content).decode("utf-8")
+            except Exception:
+                data_str = content.decode("utf-8", errors="ignore")
+
+            data = json.loads(data_str)
+            raw_episodes = data.get("podcast", {}).get("episodes", [])
+            results = []
+            for ep in raw_episodes[:count]:
+                results.append({
+                    "title": ep.get("title") or "Untitled Episode",
+                    "media_url": ep.get("url") or "",
+                    "uuid": ep.get("uuid") or ep.get("id") or "",
+                    "published": ep.get("published") or "",
+                })
+            if results:
+                return results
+        except Exception as e:
+            print(f"Pocket Casts API fetch failed: {e}", file=sys.stderr)
+
+    page_html = fetch_text(url)
+    download_url = extract_download_url(page_html)
+    if download_url:
+        return [{
+            "title": choose_output_name(url, download_url, None),
+            "media_url": download_url,
+            "uuid": "",
+            "published": "",
+        }]
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Download a podcast episode, transcribe it, or summarize an existing transcript."
     )
     parser.add_argument("input", help="Podcast episode/page URL or path to existing transcript text file")
     parser.add_argument("-o", "--output", help="Base output name or output directory")
+    parser.add_argument("-n", "--count", type=int, default=1, help="Number of latest episodes to download and summarize (default: 1)")
     parser.add_argument("--skip-download", action="store_true", help="Skip downloading audio and summarize an existing transcript file directly")
     parser.add_argument("--model", default="tiny", help="Whisper model size: tiny, base, small, medium, large")
     parser.add_argument(
@@ -831,22 +878,11 @@ def main() -> int:
         print("Please provide a valid http(s) URL unless --skip-download is used.", file=sys.stderr)
         return 2
 
-    print(f"Fetching episode page: {args.input}")
-    page_html = fetch_text(args.input)
-    download_url = extract_download_url(page_html)
-    if not download_url:
-        print("Could not find a downloadable MP3 URL in the page.", file=sys.stderr)
+    print(f"Fetching podcast episodes from URL: {args.input} (Requested latest {args.count} episodes)")
+    episodes = fetch_episodes_from_podcast_url(args.input, count=args.count)
+    if not episodes:
+        print("Could not find any downloadable episodes from the URL.", file=sys.stderr)
         return 1
-
-    audio_base = Path(choose_output_name(args.input, download_url, None)).stem
-    output_dir, output_base = resolve_output_base(args.output, audio_base)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    audio_path = output_dir / f"{output_base}.mp3"
-    print(f"Resolved audio URL: {download_url}")
-    print(f"Saving audio to: {audio_path}")
-    download_file(download_url, audio_path)
-    print("Download complete.")
 
     ffmpeg_path = find_ffmpeg()
     if not ffmpeg_path:
@@ -857,33 +893,57 @@ def main() -> int:
     os.environ["PATH"] = str(Path(ffmpeg_path).parent) + os.pathsep + os.environ.get("PATH", "")
 
     model = load_whisper_model(args.model)
-    transcript_text, segments = transcribe_audio(model, audio_path, args.source_language)
 
-    transcript_path = output_dir / f"{output_base}.txt"
-    transcript_path.write_text(transcript_text, encoding="utf-8")
-    print(f"Saved transcription to: {transcript_path}")
+    print(f"Found {len(episodes)} episode(s) to process.")
+    for idx, ep in enumerate(episodes, start=1):
+        ep_title = ep["title"]
+        download_url = ep["media_url"]
+        ep_uuid = ep["uuid"]
 
-    english_summary = generate_english_summary(
-        transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
-    )
-    if not english_summary:
-        english_summary = "(Transcription is empty; summary could not be created.)"
-    english_summary_path = output_dir / f"{output_base}.summary.en.txt"
-    if not args.source_language.lower().startswith("en") and not is_mostly_english(english_summary):
-        note = "(English translation unavailable; original summary in source language follows)\n\n"
-        english_summary_path.write_text(note + english_summary, encoding="utf-8")
-    else:
+        if not download_url:
+            print(f"[{idx}/{len(episodes)}] Skipping '{ep_title}' (No media URL)")
+            continue
+
+        print(f"\n--- [{idx}/{len(episodes)}] Processing: {ep_title} ---")
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", ep_title).strip()
+        safe_title = re.sub(r"\s+", "_", safe_title)
+        audio_base = f"{ep_uuid}_{safe_title}" if ep_uuid else safe_title
+
+        output_dir, output_base = resolve_output_base(args.output, audio_base)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = output_dir / f"{output_base}.mp3"
+        print(f"Downloading audio: {download_url}")
+        download_file(download_url, audio_path)
+
+        transcript_text, segments = transcribe_audio(model, audio_path, args.source_language)
+        transcript_path = output_dir / f"{output_base}.txt"
+        transcript_path.write_text(transcript_text, encoding="utf-8")
+        print(f"Saved transcription to: {transcript_path}")
+
+        # Clean temporary mp3 file to save disk space
+        if audio_path.exists():
+            audio_path.unlink()
+
+        english_summary = generate_english_summary(
+            transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+        )
+        if not english_summary:
+            english_summary = "(Transcription is empty; summary could not be created.)"
+        english_summary_path = output_dir / f"{output_base}.summary.en.txt"
         english_summary_path.write_text(english_summary, encoding="utf-8")
-    print(f"Saved English summary to: {english_summary_path}")
+        print(f"Saved English summary to: {english_summary_path}")
 
-    japanese_summary = generate_japanese_summary(
-        transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
-    )
-    if not japanese_summary:
-        japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
-    japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
-    japanese_summary_path.write_text(japanese_summary, encoding="utf-8")
-    print(f"Saved Japanese summary to: {japanese_summary_path}")
+        japanese_summary = generate_japanese_summary(
+            transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
+        )
+        if not japanese_summary:
+            japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
+        japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
+        japanese_summary_path.write_text(japanese_summary, encoding="utf-8")
+        print(f"Saved Japanese summary to: {japanese_summary_path}")
+
+    print("\n=== All requested episodes processed successfully ===")
     return 0
 
 

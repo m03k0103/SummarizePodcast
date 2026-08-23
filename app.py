@@ -168,48 +168,67 @@ with tab1:
 # --- タブ 2: 任意URLの要約 ---
 with tab2:
     st.subheader("任意のポッドキャスト URL からダウンロード＆要約")
-    url_input = st.text_input("ポッドキャストのエピソードページ URL (Pocket Casts 等)", placeholder="https://pocketcasts.com/podcast/...")
+    col_url, col_cnt = st.columns([3, 1])
+    with col_url:
+        url_input = st.text_input("ポッドキャストのエピソード/番組 URL (Pocket Casts 等)", placeholder="https://pocketcasts.com/podcast/...")
+    with col_cnt:
+        ep_count = st.number_input("最新要約エピソード数", min_value=1, max_value=50, value=10, step=1, help="指定した件数分の最新エピソードを順次ダウンロードして要約します")
     
     if st.button("📥 ダウンロード＆要約を開始", key="url_btn", type="primary"):
         if not url_input.strip():
             st.warning("URL を入力してください。")
         else:
-            with st.status("URL処理中...", expanded=True) as status:
-                st.write("1. ページ情報の取得中...")
-                page_html = fetch_text(url_input)
-                download_url = extract_download_url(page_html)
-                if not download_url:
-                    status.update(label="❌ ダウンロード可能な MP3 URL が見つかりませんでした", state="error")
+            with st.status("エピソード情報を取得中...", expanded=True) as status:
+                from download_and_summarize_podcast import fetch_episodes_from_podcast_url
+                st.write(f"1. `{url_input}` から最新 {ep_count} 件のエピソード情報を取得中...")
+                episodes = fetch_episodes_from_podcast_url(url_input, count=ep_count)
+                
+                if not episodes:
+                    status.update(label="❌ エピソード情報が見つかりませんでした", state="error")
                 else:
-                    st.write(f"2. MP3 URL 検出: `{download_url}`")
-                    audio_base = Path(choose_output_name(url_input, download_url, None)).stem
-                    temp_audio_path = OUTPUT_DIR / f"{audio_base}.mp3"
-                    
-                    st.write("3. 音声ファイルダウンロード中...")
-                    download_file(download_url, temp_audio_path)
-                    
-                    st.write(f"4. Whisper ({whisper_model}) 文字起こし中...")
+                    st.write(f"2. {len(episodes)} 件のエピソードが見つかりました。処理を開始します...")
                     model = load_whisper_model(whisper_model)
-                    transcript_text, _ = transcribe_audio(model, temp_audio_path, "auto")
                     
-                    txt_path = OUTPUT_DIR / f"{audio_base}.txt"
-                    txt_path.write_text(transcript_text, encoding="utf-8")
-                    
-                    st.write("5. LLM 要約生成中...")
-                    ja_sum = generate_japanese_summary(transcript_text, "en", llm_provider=llm_provider)
-                    en_sum = generate_english_summary(transcript_text, "en", llm_provider=llm_provider)
-                    
-                    ja_path = OUTPUT_DIR / f"{audio_base}.summary.ja.txt"
-                    en_path = OUTPUT_DIR / f"{audio_base}.summary.en.txt"
-                    ja_path.write_text(ja_sum, encoding="utf-8")
-                    en_path.write_text(en_sum, encoding="utf-8")
-                    
-                    status.update(label="✅ 要約完了！", state="complete")
-                    
-                    st.markdown("### 🇯🇵 日本語要約")
-                    st.markdown(ja_sum)
-                    st.markdown("### 🇬🇧 英語要約")
-                    st.markdown(en_sum)
+                    for idx, ep in enumerate(episodes, start=1):
+                        ep_title = ep["title"]
+                        download_url = ep["media_url"]
+                        ep_uuid = ep["uuid"]
+                        
+                        if not download_url:
+                            st.write(f"[{idx}/{len(episodes)}] スキップ: {ep_title} (音声URLなし)")
+                            continue
+                            
+                        st.write(f"--- **[{idx}/{len(episodes)}] 処理中: {ep_title}** ---")
+                        safe_title = re.sub(r'[\\/*?:"<>|]', "", ep_title).strip()
+                        safe_title = re.sub(r"\s+", "_", safe_title)
+                        audio_base = f"{ep_uuid}_{safe_title}" if ep_uuid else safe_title
+                        
+                        temp_audio_path = OUTPUT_DIR / f"{audio_base}.mp3"
+                        st.write(f"• 音声ファイルダウンロード中... ({download_url})")
+                        download_file(download_url, temp_audio_path)
+                        
+                        st.write(f"• Whisper ({whisper_model}) 文字起こし中...")
+                        transcript_text, _ = transcribe_audio(model, temp_audio_path, "auto")
+                        
+                        txt_path = OUTPUT_DIR / f"{audio_base}.txt"
+                        txt_path.write_text(transcript_text, encoding="utf-8")
+                        
+                        if temp_audio_path.exists():
+                            temp_audio_path.unlink()
+                            
+                        st.write("• LLM 要約生成中...")
+                        ja_sum = generate_japanese_summary(transcript_text, "en", llm_provider=llm_provider)
+                        en_sum = generate_english_summary(transcript_text, "en", llm_provider=llm_provider)
+                        
+                        ja_path = OUTPUT_DIR / f"{audio_base}.summary.ja.txt"
+                        en_path = OUTPUT_DIR / f"{audio_base}.summary.en.txt"
+                        ja_path.write_text(ja_sum, encoding="utf-8")
+                        en_path.write_text(en_sum, encoding="utf-8")
+                        
+                        st.write(f"✅ {ep_title} の処理完了！")
+                        
+                    status.update(label=f"🎉 全 {len(episodes)} 件のエピソード要約が正常完了しました！", state="complete")
+                    st.balloons()
 
 
 # --- タブ 3: テキストファイル要約 ---
