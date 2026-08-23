@@ -894,7 +894,7 @@ def main() -> int:
 
     model = load_whisper_model(args.model)
 
-    print(f"Found {len(episodes)} episode(s) to process.")
+    print(f"Found {len(episodes)} episode(s) to process. (1ファイルずつ順番にダウンロード＆要約処理)")
     for idx, ep in enumerate(episodes, start=1):
         ep_title = ep["title"]
         download_url = ep["media_url"]
@@ -904,7 +904,10 @@ def main() -> int:
             print(f"[{idx}/{len(episodes)}] Skipping '{ep_title}' (No media URL)")
             continue
 
-        print(f"\n--- [{idx}/{len(episodes)}] Processing: {ep_title} ---")
+        print(f"\n==================================================")
+        print(f" [ファイル {idx}/{len(episodes)}] 個別処理開始: {ep_title}")
+        print(f"==================================================")
+
         safe_title = re.sub(r'[\\/*?:"<>|]', "", ep_title).strip()
         safe_title = re.sub(r"\s+", "_", safe_title)
         audio_base = f"{ep_uuid}_{safe_title}" if ep_uuid else safe_title
@@ -913,18 +916,28 @@ def main() -> int:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         audio_path = output_dir / f"{output_base}.mp3"
-        print(f"Downloading audio: {download_url}")
-        download_file(download_url, audio_path)
 
-        transcript_text, segments = transcribe_audio(model, audio_path, args.source_language)
-        transcript_path = output_dir / f"{output_base}.txt"
-        transcript_path.write_text(transcript_text, encoding="utf-8")
-        print(f"Saved transcription to: {transcript_path}")
+        try:
+            # 1. 当該エピソード（1ファイル）のみダウンロード
+            print(f"1/4. 単一ファイルの音声ダウンロード中: {download_url}")
+            download_file(download_url, audio_path)
 
-        # Clean temporary mp3 file to save disk space
-        if audio_path.exists():
-            audio_path.unlink()
+            # 2. 当該エピソード（1ファイル）のみ Whisper 文字起こし
+            print(f"2/4. Whisper ({args.model}) で文字起こし中...")
+            transcript_text, segments = transcribe_audio(model, audio_path, args.source_language)
 
+            transcript_path = output_dir / f"{output_base}.txt"
+            transcript_path.write_text(transcript_text, encoding="utf-8")
+            print(f"Saved transcription to: {transcript_path}")
+
+        finally:
+            # 3. 文字起こし完了後、直ちに音声ファイル（1ファイル）を即時削除してストレージ解放
+            if audio_path.exists():
+                audio_path.unlink()
+                print(f"3/4. 音声ファイル（1ファイル）の即時削除完了 (ストレージ解放)")
+
+        # 4. LLM要約生成
+        print("4/4. LLM要約生成中...")
         english_summary = generate_english_summary(
             transcript_text, args.source_language, max_sentences=args.summary_sentences, ratio=args.summary_ratio, **llm_kwargs
         )
@@ -942,6 +955,8 @@ def main() -> int:
         japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
         japanese_summary_path.write_text(japanese_summary, encoding="utf-8")
         print(f"Saved Japanese summary to: {japanese_summary_path}")
+
+        print(f"--> [ファイル {idx}/{len(episodes)}] の全処理完了。次のファイルのダウンロードへ進みます。\n")
 
     print("\n=== All requested episodes processed successfully ===")
     return 0

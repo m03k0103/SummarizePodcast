@@ -198,25 +198,27 @@ with tab2:
                             st.write(f"[{idx}/{len(episodes)}] スキップ: {ep_title} (音声URLなし)")
                             continue
                             
-                        st.write(f"--- **[{idx}/{len(episodes)}] 処理中: {ep_title}** ---")
+                        st.markdown(f"--- **[{idx}/{len(episodes)}] 1ファイル個別処理開始: {ep_title}** ---")
                         safe_title = re.sub(r'[\\/*?:"<>|]', "", ep_title).strip()
                         safe_title = re.sub(r"\s+", "_", safe_title)
                         audio_base = f"{ep_uuid}_{safe_title}" if ep_uuid else safe_title
                         
                         temp_audio_path = OUTPUT_DIR / f"{audio_base}.mp3"
-                        st.write(f"• 音声ファイルダウンロード中... ({download_url})")
-                        download_file(download_url, temp_audio_path)
-                        
-                        st.write(f"• Whisper ({whisper_model}) 文字起こし中...")
-                        transcript_text, _ = transcribe_audio(model, temp_audio_path, "auto")
-                        
-                        txt_path = OUTPUT_DIR / f"{audio_base}.txt"
-                        txt_path.write_text(transcript_text, encoding="utf-8")
-                        
-                        if temp_audio_path.exists():
-                            temp_audio_path.unlink()
+                        try:
+                            st.write(f"1/4. 該当ファイル（1件）の音声ダウンロード中: `{download_url}`")
+                            download_file(download_url, temp_audio_path)
                             
-                        st.write("• LLM 要約生成中...")
+                            st.write(f"2/4. Whisper ({whisper_model}) 文字起こし中...")
+                            transcript_text, _ = transcribe_audio(model, temp_audio_path, "auto")
+                            
+                            txt_path = OUTPUT_DIR / f"{audio_base}.txt"
+                            txt_path.write_text(transcript_text, encoding="utf-8")
+                        finally:
+                            if temp_audio_path.exists():
+                                temp_audio_path.unlink()
+                                st.write("3/4. 音声ファイル（1件）の即時削除完了 (ストレージ解放)")
+                            
+                        st.write("4/4. LLM 要約生成中...")
                         ja_sum = generate_japanese_summary(transcript_text, "en", llm_provider=llm_provider)
                         en_sum = generate_english_summary(transcript_text, "en", llm_provider=llm_provider)
                         
@@ -225,7 +227,7 @@ with tab2:
                         ja_path.write_text(ja_sum, encoding="utf-8")
                         en_path.write_text(en_sum, encoding="utf-8")
                         
-                        st.write(f"✅ {ep_title} の処理完了！")
+                        st.success(f"✅ [{idx}/{len(episodes)}] {ep_title} の全処理完了。次のファイルへ進みます。")
                         
                     status.update(label=f"🎉 全 {len(episodes)} 件のエピソード要約が正常完了しました！", state="complete")
                     st.balloons()
