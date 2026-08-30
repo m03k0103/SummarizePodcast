@@ -14,6 +14,5 @@ venv/
 *.tmp
 *.log
 
-# Keep Output directory text files for summaries
-!Output/
-!Output/*.txt
+# Output directory (Exclude generated transcripts & summaries from repository)
+Output/

@@ -55,11 +55,11 @@ jobs:
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           
-          git add last_processed_guid.txt Output/
+          git add last_processed_guid.txt
           
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore(auto): update podcast summary and processed guid [skip ci]"
+            git commit -m "chore(auto): update processed guid [skip ci]"
             git push origin main
           fi
