@@ -15,6 +15,10 @@ import tempfile
 import urllib.request
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # Source フォルダから既存のコア機能をインポート
 PROJECT_ROOT = Path(__file__).resolve().parent
 SOURCE_DIR = PROJECT_ROOT / "Source"
