@@ -18,8 +18,8 @@ if (-not (Test-Path $venvPath)) {
 $activateScript = Join-Path $venvPath 'Scripts\Activate.ps1'
 . $activateScript
 
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install openvino openvino-dev nncf optimum-intel transformers faster-whisper
+python -m pip install pip==24.2 setuptools==75.1.0 wheel==0.44.0
+python -m pip install openvino==2024.4.0 openvino-dev==2024.4.0 nncf==2.13.0 optimum-intel==1.20.0 transformers==4.45.1 faster-whisper==1.0.3
 
 Write-Host ''
 Write-Host 'Intel NPU setup completed.'
