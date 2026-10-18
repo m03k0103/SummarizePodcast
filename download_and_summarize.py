@@ -114,44 +114,44 @@ def main() -> int:
     safe_title = sanitize_filename(ep_title)
     output_base_name = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
 
-    # 一時音声ファイルへのダウンロードと要約
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_audio_path = Path(temp_dir) / "temp_audio.mp3"
-        print(f"音声ファイルを一時ダウンロード中... ({ep_media_url})")
-
+    audio_path = OUTPUT_DIR / f"{output_base_name}.mp3"
+    if audio_path.exists() and audio_path.stat().st_size > 0:
+        print(f"既存のローカル音声ファイルを使用します: {audio_path}")
+    else:
+        print(f"音声ファイルをダウンロード中... ({ep_media_url})")
         req = urllib.request.Request(ep_media_url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=120) as resp, open(temp_audio_path, "wb") as out:
+        with urllib.request.urlopen(req, timeout=120) as resp, open(audio_path, "wb") as out:
             shutil.copyfileobj(resp, out)
-        print("ダウンロード完了。")
+        print(f"ダウンロード完了: {audio_path}")
 
-        # FFmpeg チェック
-        ffmpeg_path = find_ffmpeg()
-        if ffmpeg_path:
-            os.environ["FFMPEG_BINARY"] = ffmpeg_path
-            os.environ["PATH"] = str(Path(ffmpeg_path).parent) + os.pathsep + os.environ.get("PATH", "")
+    # FFmpeg チェック
+    ffmpeg_path = find_ffmpeg()
+    if ffmpeg_path:
+        os.environ["FFMPEG_BINARY"] = ffmpeg_path
+        os.environ["PATH"] = str(Path(ffmpeg_path).parent) + os.pathsep + os.environ.get("PATH", "")
 
-        # Whisper 文字起こし
-        print(f"Whisper ({args.model}) で文字起こし実行中...")
-        model = load_whisper_model(args.model)
-        transcript_text, _ = transcribe_audio(model, temp_audio_path, "auto")
+    # Whisper 文字起こし
+    print(f"Whisper ({args.model}) で文字起こし実行中...")
+    model = load_whisper_model(args.model)
+    transcript_text, _ = transcribe_audio(model, audio_path, "auto")
 
-        transcript_path = OUTPUT_DIR / f"{output_base_name}.txt"
-        transcript_path.write_text(transcript_text, encoding="utf-8")
-        print(f"文字起こしテキスト保存完了: {transcript_path}")
+    transcript_path = OUTPUT_DIR / f"{output_base_name}.txt"
+    transcript_path.write_text(transcript_text, encoding="utf-8")
+    print(f"文字起こしテキスト保存完了: {transcript_path}")
 
-        # LLM 要約
-        print("LLM要約生成中 (Gemini / OpenAI / Ollama)...")
-        en_summary = generate_english_summary(transcript_text, "en")
-        ja_summary = generate_japanese_summary(transcript_text, "en")
+    # LLM 要約
+    print("LLM要約生成中 (Gemini / OpenAI / Ollama)...")
+    en_summary = generate_english_summary(transcript_text, "en")
+    ja_summary = generate_japanese_summary(transcript_text, "en")
 
-        en_path = OUTPUT_DIR / f"{output_base_name}.summary.en.txt"
-        ja_path = OUTPUT_DIR / f"{output_base_name}.summary.ja.txt"
+    en_path = OUTPUT_DIR / f"{output_base_name}.summary.en.txt"
+    ja_path = OUTPUT_DIR / f"{output_base_name}.summary.ja.txt"
 
-        en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
-        ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
+    en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
+    ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
 
-        print(f"Saved English summary to: {en_path}")
-        print(f"Saved Japanese summary to: {ja_path}")
+    print(f"Saved English summary to: {en_path}")
+    print(f"Saved Japanese summary to: {ja_path}")
 
     # 一時ファイル削除後に GUID を保存
     if ep_guid:

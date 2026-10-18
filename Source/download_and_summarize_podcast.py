@@ -321,15 +321,24 @@ def remove_boilerplate(text: str) -> str:
     return content.strip()
 
 
-def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-2.0-flash") -> str:
+def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-3.6-flash") -> str:
     import time
     import urllib.error
     model_path = model if model.startswith("models/") else f"models/{model}"
     url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
-    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "safetySettings": [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"}
+        ]
+    }).encode("utf-8")
 
     max_retries = 3
-    backoff = 5
+    backoff = 3
     for attempt in range(max_retries):
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         try:
@@ -338,12 +347,16 @@ def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-2.0-flash") 
                 candidates = data.get("candidates", [])
                 if candidates:
                     parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", "").strip()
+                    text_chunks = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text") and not p.get("thought")]
+                    if not text_chunks:
+                        text_chunks = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
+                    res = "".join(text_chunks).strip()
+                    if res:
+                        return res
                 return ""
         except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt < max_retries - 1:
-                print(f"Rate limit hit for {model_path}. Retrying in {backoff} seconds... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
+            if exc.code in (429, 503) and attempt < max_retries - 1:
+                print(f"Rate limit / busy status ({exc.code}) for {model_path}. Retrying in {backoff} seconds... (attempt {attempt+1}/{max_retries})", file=sys.stderr)
                 time.sleep(backoff)
                 backoff *= 2
             else:
@@ -463,13 +476,13 @@ def summarize_with_llm(
         if not gemini_key:
             print("Gemini API key is required. Set GEMINI_API_KEY env var or pass --gemini-api-key.", file=sys.stderr)
             return None
-        target_model = model or "gemini-flash-latest"
+        target_model = model or "gemini-3.6-flash"
         print(f"Summarizing using Gemini API ({target_model})...")
         res = call_gemini_api(prompt, gemini_key, model=target_model)
         if res:
             return res
         import time
-        for fallback_model in ["gemini-flash-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemma-4-31b-it"]:
+        for fallback_model in ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]:
             if fallback_model == target_model:
                 continue
             time.sleep(1)
@@ -477,6 +490,7 @@ def summarize_with_llm(
             res = call_gemini_api(prompt, gemini_key, model=fallback_model)
             if res:
                 return res
+
 
     elif active_provider == "openai":
         if not openai_key:

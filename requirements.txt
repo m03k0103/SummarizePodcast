@@ -1,2 +1,4 @@
 openai-whisper
 streamlit
+google-generativeai
+requests
