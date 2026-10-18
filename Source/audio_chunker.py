@@ -125,15 +125,23 @@ def extract_speaker_profile_and_tail(transcript: str, tail_lines_count: int = 4)
 
     lines = [line.strip() for line in transcript.splitlines() if line.strip()]
     
-    # 話者ラベルの検出（例: [話者1], [話者2 (けんすう)], [深井] 等）
-    speaker_pattern = re.compile(r'\[(?:\d{1,2}:\d{2}(?::\d{2})?)?\]?\s*\[(.*?)\]')
+    # 話者ラベルの検出（例: [話者1 (深井)], [話者2 (けんすう)], [話者1] 等）
+    speaker_pattern = re.compile(r'\[(話者\s*\d+[^\]]*)\]')
     found_speakers = []
     for line in lines:
         for m in speaker_pattern.finditer(line):
             spk = m.group(1).strip()
-            # タイムスタンプ誤認等の数字単体を除外
-            if spk and not re.match(r'^\d{1,2}:\d{2}', spk) and spk not in found_speakers:
+            if spk and spk not in found_speakers:
                 found_speakers.append(spk)
+
+    # 見つからない場合は汎用的なラベル（[深井] 等）をフォールバック探索
+    if not found_speakers:
+        fallback_pattern = re.compile(r'\[(?:\d{1,2}:\d{2}(?::\d{2})?)?\]?\s*\[(.*?)\]')
+        for line in lines:
+            for m in fallback_pattern.finditer(line):
+                spk = m.group(1).strip()
+                if spk and not re.match(r'^\d{1,2}:\d{2}', spk) and spk not in found_speakers:
+                    found_speakers.append(spk)
 
     # 末尾の数行
     tail_lines = lines[-tail_lines_count:] if len(lines) >= tail_lines_count else lines
@@ -191,17 +199,31 @@ def build_chunk_prompt(
 ) -> str:
     """
     チャンク分割時のコンテキスト引き継ぎ用プロンプトを構築する。
+    話者の名前を同定し、[話者1 (深井)] のような形式で出力させる。
     """
     title_context = f"ポッドキャスト/エピソード名: {podcast_title}\n" if podcast_title else ""
     part_info = f"【パート {chunk_index}/{total_chunks}】\n" if total_chunks > 1 else ""
+
+    # パーソナリティ・ゲストに関するヒントの推測
+    hints = []
+    if podcast_title:
+        if any(k in podcast_title for k in ["幻会議", "深井", "件数", "けんすう"]):
+            hints.append("本番組（深井件数の幻会議）のレギュラー出演者は「深井龍之介（深井）」と「けんすう（古川健介）」の2名です。発言者の声や役割に応じて [話者1 (深井)]、[話者2 (けんすう)] のように名前を明記してください。")
+        m_guest = re.search(r"【初?ゲスト回?】?([^\sさん]+(?:さん|氏|様)?)", podcast_title)
+        if m_guest and not any(k in m_guest.group(1) for k in ["深井", "件数", "けんすう"]):
+            hints.append(f"ゲストとして「{m_guest.group(1)}」が参加している可能性があります。登場時は [話者3 (名前)] 等として識別してください。")
+
+    hint_context = ""
+    if hints:
+        hint_context = "【出演者ヒント】\n" + "\n".join([f"- {h}" for h in hints]) + "\n"
 
     context_injection = ""
     if chunk_index > 1 and previous_speakers:
         speakers_str = "、".join([f"[{s}]" for s in previous_speakers])
         context_injection = (
             f"【直前パートからの継続コンテキスト】\n"
-            f"直前のパートから続く対談音声です。登場人物の話者番号およびラベルを前パートと完全に一致させてください。\n"
-            f"- 前パートで確認された話者: {speakers_str}\n"
+            f"直前のパートから続く対談音声です。登場人物の話者番号および名前ラベルを前パートと完全に一致させてください。\n"
+            f"- 前パートで確認された話者ラベル: {speakers_str}\n"
         )
         if previous_tail:
             context_injection += (
@@ -212,15 +234,19 @@ def build_chunk_prompt(
     prompt = (
         f"このポッドキャストの音声を詳細かつ忠実に文字起こししてください。\n"
         f"{title_context}"
+        f"{hint_context}"
         f"{part_info}"
         f"{context_injection}"
         "【要件】\n"
-        "1. 【最重要：話者分離と交互発言の維持】\n"
+        "1. 【最重要：話者分離と話者名の明記】\n"
         "   - 本音声は複数名による対話・対談ポッドキャストです（1人の独白ではありません）。\n"
-        "   - 発言者の声質（音の高さ、トーン、抑揚）を1文ごとに注意深く識別し、各発言の先頭に話者ラベルを付与してください（例: [話者1], [話者2] 等）。\n"
+        "   - 各発言行の先頭は必ず `[MM:SS] [話者X (名前)]: 発言内容` のフォーマットで統一してください。\n"
+        "     （例: `[00:00] [話者1 (深井)]: 幻会議の幻会議。`、`[00:04] [話者2 (けんすう)]: はい、...`、`[00:30] [話者3 (川邊)]: よろしくお願いします。`）\n"
+        "   - タイトルコール、自己紹介、会話内の呼びかけ（「〇〇さん」等）から話者の名前を特定し、必ず【話者番号＋括弧内に名前】を付けてください。名前が判明しない場合のみ `[話者1]` や `[話者2]` とし、会話途中で名前が判明した場合は以降その名前付きラベルを使用してください。\n"
         "   - 【話者膠着・偏りの禁止】会話の中で一方の話者が長く語る場合でも、相手からの相槌（「うん」「はい」「なるほど」「確かに」など）や短い質問が必ず挟まれます。相槌や短いリアクションであっても声が変わっていれば必ず相手側の話者ラベルに切り替えてください。直前の話者ラベルの慣性に引きずられて、1人の話者ラベル（例: [話者2] のみ）が何分間も連続して出力される状態は絶対に避けてください。\n"
-        "2. おおよそのタイムスタンプ（例: [00:15]）を適宜付与してください（この音声区間の開始位置からの相対時間で記述してください）。\n"
+        "2. おおよそのタイムスタンプ（例: [00:15]）を各発言行に付与してください（この音声区間の開始位置からの相対時間で記述してください）。\n"
         "3. 会話内容を要約・省略せず、発言内容を忠実に漏れなく書き起こしてください。\n"
         "4. 【リピートループ禁止】同一単語やフレーズの異常な繰り返し（リピートループ・幻覚）は絶対に避けてください。言い淀みは自然に整形してください。\n"
     )
     return prompt
+

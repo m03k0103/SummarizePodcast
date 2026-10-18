@@ -567,7 +567,8 @@ def execute_episode_pipeline(
     is_latest: bool = False,
     asr_engine: str = "gemini",
     gemini_key: str | None = None,
-    gemini_model: str = "gemini-3.6-flash"
+    gemini_model: str = "gemini-3.6-flash",
+    podcast_name: str = ""
 ):
     """1エピソードをダウンロード -> 文字起こし(Whisper or Gemini) -> 要約 -> 保存 -> GUID更新"""
     safe_title = sanitize_filename(ep_title)
@@ -595,11 +596,12 @@ def execute_episode_pipeline(
         if not gemini_key:
             raise ValueError("Gemini 文字起こしを利用するには Gemini API Key の設定が必要です。サイドバーで入力してください。")
         st.write(f"🎙️ **ステップ 2/3: Gemini ({gemini_model}) マルチモーダルで文字起こし＆話者分離を実行中...**")
+        full_title = f"{podcast_name} - {ep_title}" if podcast_name else ep_title
         transcript_text = transcribe_audio_with_gemini(
             audio_path=audio_path,
             api_key=gemini_key,
             model_name=gemini_model,
-            podcast_title=ep_title
+            podcast_title=full_title
         )
     else:
         # FFmpeg 設定
@@ -892,7 +894,8 @@ with tab1:
                             is_latest=True,
                             asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                             gemini_key=gemini_key_input,
-                            gemini_model=gemini_asr_model
+                            gemini_model=gemini_asr_model,
+                            podcast_name=p_title
                         )
 
                         status.update(label="🎉 要約処理がすべて完了しました！", state="complete")
@@ -1026,7 +1029,8 @@ with tab2:
                         is_latest=False,
                         asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                         gemini_key=gemini_key_input,
-                        gemini_model=gemini_asr_model
+                        gemini_model=gemini_asr_model,
+                        podcast_name=p_title
                     )
                     status.update(label="🎉 処理完了！", state="complete")
                     st.balloons()
@@ -1082,7 +1086,8 @@ with tab3:
                             is_latest=(idx == 1),
                             asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                             gemini_key=gemini_key_input,
-                            gemini_model=gemini_asr_model
+                            gemini_model=gemini_asr_model,
+                            podcast_name=p_title
                         )
                     except Exception as e:
                         st.error(f"エラーが発生しました: {e}")
