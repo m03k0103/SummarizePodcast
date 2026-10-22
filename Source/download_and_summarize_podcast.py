@@ -325,7 +325,7 @@ def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-3.6-flash") 
     import time
     import urllib.error
     model_path = model if model.startswith("models/") else f"models/{model}"
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_path}:generateContent"
     payload = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "safetySettings": [
@@ -340,7 +340,7 @@ def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-3.6-flash") 
     max_retries = 3
     backoff = 3
     for attempt in range(max_retries):
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json", "x-goog-api-key": api_key})
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 data = json.loads(resp.read().decode("utf-8"))

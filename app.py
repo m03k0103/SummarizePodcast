@@ -280,13 +280,14 @@ def _transcribe_single_audio_file_with_gemini(
     st.caption(f"{prefix_str}☁️ Gemini File API へ音声ファイル ({display_name}, {file_size / (1024*1024):.1f} MB) をアップロード中...")
 
     # 1. Resumable Upload の初期化
-    init_url = f"https://generativelanguage.googleapis.com/upload/v1beta/files?key={clean_key}"
+    init_url = "https://generativelanguage.googleapis.com/upload/v1beta/files"
     init_headers = {
         "X-Goog-Upload-Protocol": "resumable",
         "X-Goog-Upload-Command": "start",
         "X-Goog-Upload-Header-Content-Length": str(file_size),
         "X-Goog-Upload-Header-Content-Type": "audio/mp3",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "x-goog-api-key": clean_key
     }
     init_body = json.dumps({"file": {"display_name": display_name}}).encode("utf-8")
     init_req = urllib.request.Request(init_url, data=init_body, headers=init_headers, method="POST")
@@ -332,8 +333,8 @@ def _transcribe_single_audio_file_with_gemini(
             while file_info.get("state") == "PROCESSING" and elapsed < max_wait:
                 time.sleep(3)
                 elapsed += 3
-                get_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={clean_key}"
-                with urllib.request.urlopen(urllib.request.Request(get_url), timeout=30) as resp:
+                get_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}"
+                with urllib.request.urlopen(urllib.request.Request(get_url, headers={"x-goog-api-key": clean_key}), timeout=30) as resp:
                     file_info = json.loads(resp.read().decode("utf-8"))
 
         if file_info.get("state") == "FAILED":
@@ -380,11 +381,11 @@ def _transcribe_single_audio_file_with_gemini(
         last_error = None
         for try_model in candidate_models:
             st.caption(f"{prefix_str}🧠 Gemini ({try_model}) で音声認識と話者分離を実行中...")
-            gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent?key={clean_key}"
+            gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent"
             gen_req = urllib.request.Request(
                 gen_url,
                 data=json.dumps(req_body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "x-goog-api-key": clean_key},
                 method="POST"
             )
 
@@ -442,8 +443,8 @@ def _transcribe_single_audio_file_with_gemini(
         # 5. クリーンアップ (Googleサーバー上の一時ファイル削除)
         if file_name:
             try:
-                del_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}?key={clean_key}"
-                del_req = urllib.request.Request(del_url, method="DELETE")
+                del_url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}"
+                del_req = urllib.request.Request(del_url, headers={"x-goog-api-key": clean_key}, method="DELETE")
                 with urllib.request.urlopen(del_req, timeout=30):
                     pass
             except Exception:
