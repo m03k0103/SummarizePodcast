@@ -456,7 +456,8 @@ def transcribe_audio_with_gemini(
     api_key: str,
     model_name: str = "gemini-3.6-flash",
     podcast_title: str = "",
-    chunk_minutes: int = 15
+    chunk_minutes: int = 15,
+    is_monologue: bool = False
 ) -> str:
     """
     Gemini Files REST API を用いて音声を文字起こし。
@@ -476,7 +477,8 @@ def transcribe_audio_with_gemini(
         prompt = build_chunk_prompt(
             podcast_title=podcast_title,
             chunk_index=1,
-            total_chunks=1
+            total_chunks=1,
+            is_monologue=is_monologue
         )
         return _transcribe_single_audio_file_with_gemini(
             audio_path=audio_path,
@@ -488,7 +490,8 @@ def transcribe_audio_with_gemini(
     # 15分超の場合はチャンク分割処理
     chunks = split_audio_into_chunks(audio_path, ffmpeg_path, chunk_minutes=chunk_minutes)
     total_chunks = len(chunks)
-    st.info(f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。話者分離の精度維持のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。")
+    split_reason = "一人語りの文脈維持" if is_monologue else "話者分離の精度維持"
+    st.info(f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。{split_reason}のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。")
 
     transcripts = []
     accumulated_speakers = []
@@ -513,7 +516,8 @@ def transcribe_audio_with_gemini(
                 chunk_index=part_num,
                 total_chunks=total_chunks,
                 previous_speakers=accumulated_speakers,
-                previous_tail=last_tail
+                previous_tail=last_tail,
+                is_monologue=is_monologue
             )
 
             # チャンク文字起こし実行
@@ -569,7 +573,8 @@ def execute_episode_pipeline(
     asr_engine: str = "gemini",
     gemini_key: str | None = None,
     gemini_model: str = "gemini-3.6-flash",
-    podcast_name: str = ""
+    podcast_name: str = "",
+    is_monologue: bool = False
 ):
     """1エピソードをダウンロード -> 文字起こし(Whisper or Gemini) -> 要約 -> 保存 -> GUID更新"""
     safe_title = sanitize_filename(ep_title)
@@ -596,13 +601,15 @@ def execute_episode_pipeline(
     if asr_engine == "gemini":
         if not gemini_key:
             raise ValueError("Gemini 文字起こしを利用するには Gemini API Key の設定が必要です。サイドバーで入力してください。")
-        st.write(f"🎙️ **ステップ 2/3: Gemini ({gemini_model}) マルチモーダルで文字起こし＆話者分離を実行中...**")
+        mode_label = "（一人語りモード）" if is_monologue else "＆話者分離"
+        st.write(f"🎙️ **ステップ 2/3: Gemini ({gemini_model}) マルチモーダルで文字起こし{mode_label}を実行中...**")
         full_title = f"{podcast_name} - {ep_title}" if podcast_name else ep_title
         transcript_text = transcribe_audio_with_gemini(
             audio_path=audio_path,
             api_key=gemini_key,
             model_name=gemini_model,
-            podcast_title=full_title
+            podcast_title=full_title,
+            is_monologue=is_monologue
         )
     else:
         # FFmpeg 設定
@@ -704,6 +711,14 @@ else:
     gemini_asr_model = model_choice.split()[0]
     if not gemini_key_input:
         st.sidebar.warning("⚠️ Gemini API Key を設定してください")
+
+dialogue_mode = st.sidebar.radio(
+    "出演者構成（話者分離設定）",
+    ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+    index=0,
+    help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
+)
+is_monologue = dialogue_mode.startswith("🎙️")
 
 
 
@@ -896,7 +911,8 @@ with tab1:
                             asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
-                            podcast_name=p_title
+                            podcast_name=p_title,
+                            is_monologue=is_monologue
                         )
 
                         status.update(label="🎉 要約処理がすべて完了しました！", state="complete")
@@ -1031,7 +1047,8 @@ with tab2:
                         asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                         gemini_key=gemini_key_input,
                         gemini_model=gemini_asr_model,
-                        podcast_name=p_title
+                        podcast_name=p_title,
+                        is_monologue=is_monologue
                     )
                     status.update(label="🎉 処理完了！", state="complete")
                     st.balloons()
@@ -1088,7 +1105,8 @@ with tab3:
                             asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
-                            podcast_name=p_title
+                            podcast_name=p_title,
+                            is_monologue=is_monologue
                         )
                     except Exception as e:
                         st.error(f"エラーが発生しました: {e}")

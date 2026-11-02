@@ -195,16 +195,46 @@ def build_chunk_prompt(
     chunk_index: int,
     total_chunks: int,
     previous_speakers: list[str] | None = None,
-    previous_tail: str | None = None
+    previous_tail: str | None = None,
+    is_monologue: bool = False
 ) -> str:
     """
     チャンク分割時のコンテキスト引き継ぎ用プロンプトを構築する。
-    話者の名前を同定し、[話者1 (深井)] のような形式で出力させる。
+    - is_monologue=False (デフォルト): 対話ポッドキャストとして話者を同定し、[話者1 (深井)] のような形式で出力させる。
+    - is_monologue=True: 一人語りポッドキャストとして話者ラベルを付与せず、[MM:SS] 発言内容 の自然な文章として出力させる。
     """
     title_context = f"ポッドキャスト/エピソード名: {podcast_title}\n" if podcast_title else ""
     part_info = f"【パート {chunk_index}/{total_chunks}】\n" if total_chunks > 1 else ""
 
-    # パーソナリティ・ゲストに関するヒントの推測
+    if is_monologue:
+        context_injection = ""
+        if chunk_index > 1 and previous_tail:
+            context_injection = (
+                f"【直前パートからの継続コンテキスト】\n"
+                f"直前のパートから続く単独音声です。文脈の連続性を保って書き起こしてください。\n"
+                f"- 前パート直前の発言内容（この直後から始まります）:\n"
+                f"```\n{previous_tail}\n```\n"
+            )
+
+        prompt = (
+            f"このポッドキャストの音声を詳細かつ忠実に文字起こししてください。\n"
+            f"{title_context}"
+            f"{part_info}"
+            f"{context_injection}"
+            "【要件】\n"
+            "1. 【最重要：一人語り・自然な段落書き起こし】\n"
+            "   - 本音声は単独パーソナリティによる一人語り・独白ポッドキャストです。\n"
+            "   - 【話者分離・話者ラベルの付与は不要です】。[話者1] や [話者2]、出演者名などの話者ラベルは一切付与しないでください。\n"
+            "   - 段落や話題の区切りごとに、行頭にタイムスタンプを付与し `[MM:SS] 発言内容...` のフォーマットで自然な文章として書き起こしてください。\n"
+            "     （例: `[00:00] みなさんこんにちは。今日は〇〇について話します。`、`[00:45] さて、次の話題ですが...`）\n"
+            "   - 存在しない別人の相槌や発言を捏造・幻覚（ハルシネーション）しないでください。\n"
+            "2. おおよそのタイムスタンプ（例: [00:15]）を話題や段落の区切りごとに付与してください（この音声区間の開始位置からの相対時間で記述してください）。\n"
+            "3. 発言内容を要約・省略せず、忠実に漏れなく書き起こしてください。\n"
+            "4. 【リピートループ禁止】同一単語やフレーズの異常な繰り返し（リピートループ・幻覚）は絶対に避けてください。言い淀みは自然に整形してください。\n"
+        )
+        return prompt
+
+    # パーソナリティ・ゲストに関するヒントの推測（対談用）
     hints = []
     if podcast_title:
         if any(k in podcast_title for k in ["幻会議", "深井", "件数", "けんすう"]):
@@ -249,4 +279,3 @@ def build_chunk_prompt(
         "4. 【リピートループ禁止】同一単語やフレーズの異常な繰り返し（リピートループ・幻覚）は絶対に避けてください。言い淀みは自然に整形してください。\n"
     )
     return prompt
-
