@@ -1,10 +1,10 @@
-# Podcast AI Summarizer Agent Development Guidelines (AGENT.md)
+# Podcast AI Summarizer Agent Development Guidelines (AGENTS.md)
 
 本ドキュメントは、Podcast AI Summarizer リポジトリにおいて作業を行うすべての AI Agent（ペアプログラミングアシスタント）に対する必須の行動規範および本リポジトリ固有の開発運用ルールを定めたものです。
 
 > [!IMPORTANT]
 > **共通行動規範・開発運用ルールの遵守**:
-> コミュニケーション規範、Windows文字コード、**Implementation Plan の事前承認**、**コマンドの自律実行**、**Git ブランチ運用・即時リモート push**、**Drops.md の標準4大構成・最新化タイミング**、**データ修正時の2大責務（再発防止ガード＋横展開確認）**、**Webスクレイピング原則（標準ヘッダー・レートリミット・文字化け自動判定）**、**客観的表現の徹底** 等の共通規範は、すべて [`GLOBAL_RULES.md`](file:///C:/Users/m03k0/.gemini/antigravity/rules/GLOBAL_RULES.md) に定義されています。エージェントはこれらを完全に遵守してください。
+> コミュニケーション規範、Windows文字コード、**Implementation Plan の事前承認**、**コマンドの自律実行**、**Git ブランチ運用・即時リモート push**、**Drops.md の標準4大構成・最新化タイミング**、**データ修正時の2大責務（再発防止ガード＋横展開確認）**、**客観的表現の徹底** 等の共通規範は、すべて [`GLOBAL_RULES.md`](file:///C:/Users/m03k0/.gemini/antigravity/rules/GLOBAL_RULES.md) に定義されています。エージェントはこれらを完全に遵守してください。
 
 ---
 
