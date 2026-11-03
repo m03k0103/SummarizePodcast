@@ -43,6 +43,71 @@ from audio_chunker import (
 # 保存先・管理ファイル
 OUTPUT_DIR = PROJECT_ROOT / "Output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_podcast_output_dir(podcast_name: str | None = None) -> Path:
+    """
+    ポッドキャスト番組名に基づく保存先ディレクトリを返却（存在しない場合は自動作成）。
+    既存のサブフォルダ（例: 'まぼろし会議', 'Howard Marks', 'Behind the Markets'）との柔軟な一致を優先。
+    """
+    if not podcast_name or not podcast_name.strip():
+        folder = OUTPUT_DIR / "default"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    name = podcast_name.strip()
+    safe_name = sanitize_filename(name)
+
+    # 1. 完全一致する既存サブフォルダがあり、かつ中身がある場合は即座に再利用
+    direct_match = OUTPUT_DIR / safe_name
+    if direct_match.exists() and direct_match.is_dir() and any(direct_match.iterdir()):
+        return direct_match
+
+    # 2. 既存サブフォルダの部分一致探索（ファイルが存在するフォルダを優先）
+    matching_dirs = []
+    for d in OUTPUT_DIR.iterdir():
+        if d.is_dir():
+            d_name = d.name.lower()
+            if d_name and (d_name in name.lower() or name.lower() in d_name):
+                has_files = any(d.iterdir())
+                matching_dirs.append((has_files, d))
+
+    if matching_dirs:
+        # ファイルが存在するフォルダを最優先、次いで名前の適合度
+        matching_dirs.sort(key=lambda x: (not x[0], len(x[1].name)))
+        return matching_dirs[0][1]
+
+    # 3. なければ safe_name で新規作成
+    folder = OUTPUT_DIR / safe_name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def find_output_file(output_base: str, suffix: str, podcast_name: str | None = None) -> Path | None:
+    """
+    指定エピソードのファイルを探索して Path を返却（新サブフォルダ優先、旧ルート直下フォールバック）。
+    suffix 例: '.summary.ja.txt', '.mp3', '.txt'
+    """
+    filename = f"{output_base}{suffix}"
+
+    # 1. 指定ポッドキャストのサブフォルダ内
+    if podcast_name:
+        target_dir = get_podcast_output_dir(podcast_name)
+        p = target_dir / filename
+        if p.exists() and p.is_file():
+            return p
+
+    # 2. Output 直下（後方互換性）
+    root_file = OUTPUT_DIR / filename
+    if root_file.exists() and root_file.is_file():
+        return root_file
+
+    # 3. Output 配下の全サブフォルダを再帰検索
+    matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
+    if matched:
+        return matched[0]
+
+    return None
 PODCAST_LIST_FILE = PROJECT_ROOT / "saved_podcasts.json"
 PROCESSED_GUIDS_FILE = PROJECT_ROOT / "processed_guids.json"
 LEGACY_GUID_FILE = PROJECT_ROOT / "last_processed_guid.txt"
@@ -242,12 +307,12 @@ def fetch_feed_data(url_or_uuid: str) -> tuple[dict, list[dict]]:
     return podcast_info, episodes
 
 
-def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str) -> bool:
-    """エピソードが処理済みかどうかを判定（Outputファイルの存在 または GUID記録）"""
+def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", podcast_name: str = "") -> bool:
+    """エピソードが処理済みかどうかを判定（新サブフォルダまたは旧Outputファイルの存在 または GUID記録）"""
     safe_title = sanitize_filename(ep_title)
     output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
-    ja_summary_file = OUTPUT_DIR / f"{output_base}.summary.ja.txt"
-    if ja_summary_file.exists():
+    ja_summary_file = find_output_file(output_base, ".summary.ja.txt", podcast_name)
+    if ja_summary_file and ja_summary_file.exists():
         return True
     
     # GUID チェック
@@ -580,17 +645,22 @@ def execute_episode_pipeline(
     safe_title = sanitize_filename(ep_title)
     output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
 
-    txt_path = OUTPUT_DIR / f"{output_base}.txt"
-    ja_path = OUTPUT_DIR / f"{output_base}.summary.ja.txt"
-    en_path = OUTPUT_DIR / f"{output_base}.summary.en.txt"
+    # ポッドキャストごとの保存先ディレクトリを取得
+    target_dir = get_podcast_output_dir(podcast_name)
 
-    audio_path = OUTPUT_DIR / f"{output_base}.mp3"
+    txt_path = target_dir / f"{output_base}.txt"
+    ja_path = target_dir / f"{output_base}.summary.ja.txt"
+    en_path = target_dir / f"{output_base}.summary.en.txt"
+    audio_path = target_dir / f"{output_base}.mp3"
 
-    # 音声ダウンロード（既存があれば再利用）
-    if audio_path.exists() and audio_path.stat().st_size > 0:
-        st.write(f"📁 **既存のローカル音声ファイルを使用します:** `{audio_path.name}`")
+    # 既存の音声ファイル探索（新サブフォルダ優先、旧ルート直下フォールバック）
+    existing_audio = find_output_file(output_base, ".mp3", podcast_name)
+
+    if existing_audio and existing_audio.exists() and existing_audio.stat().st_size > 0:
+        st.write(f"📁 **既存のローカル音声ファイルを使用します:** `{existing_audio.name}`")
+        audio_path = existing_audio
     else:
-        st.write("📥 **ステップ 1/3: 音声をダウンロード中... (Outputフォルダに保存)**")
+        st.write(f"📥 **ステップ 1/3: 音声をダウンロード中... ({target_dir.name} フォルダに保存)**")
         st.caption(f"URL: `{ep_media_url}`")
         req = urllib.request.Request(ep_media_url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=120) as resp, open(audio_path, "wb") as out:
@@ -923,7 +993,8 @@ with tab1:
                             "ja": ja_sum,
                             "en": en_sum,
                             "transcript": transcript,
-                            "base_name": f"{ep_guid}_{sanitize_filename(ep_title)}" if ep_guid else sanitize_filename(ep_title)
+                            "base_name": f"{ep_guid}_{sanitize_filename(ep_title)}" if ep_guid else sanitize_filename(ep_title),
+                            "podcast_name": p_title
                         }
                     except Exception as e:
                         status.update(label=f"❌ エラーが発生しました: {e}", state="error")
@@ -934,16 +1005,17 @@ with tab1:
         if not result_data and is_processed:
             safe_title = sanitize_filename(ep_title)
             output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
-            ja_file = OUTPUT_DIR / f"{output_base}.summary.ja.txt"
-            en_file = OUTPUT_DIR / f"{output_base}.summary.en.txt"
-            txt_file = OUTPUT_DIR / f"{output_base}.txt"
-            if ja_file.exists():
+            ja_file = find_output_file(output_base, ".summary.ja.txt", p_title)
+            en_file = find_output_file(output_base, ".summary.en.txt", p_title)
+            txt_file = find_output_file(output_base, ".txt", p_title)
+            if ja_file and ja_file.exists():
                 result_data = {
                     "title": ep_title,
                     "ja": ja_file.read_text(encoding="utf-8"),
-                    "en": en_file.read_text(encoding="utf-8", errors="ignore") if en_file.exists() else "",
-                    "transcript": txt_file.read_text(encoding="utf-8", errors="ignore") if txt_file.exists() else "",
-                    "base_name": output_base
+                    "en": en_file.read_text(encoding="utf-8", errors="ignore") if en_file and en_file.exists() else "",
+                    "transcript": txt_file.read_text(encoding="utf-8", errors="ignore") if txt_file and txt_file.exists() else "",
+                    "base_name": output_base,
+                    "podcast_name": p_title
                 }
 
         if result_data:
@@ -979,8 +1051,9 @@ with tab1:
                 st.text_area("文字起こし本文", value=result_data["transcript"], height=400)
 
             with res_tab4:
-                saved_audio = OUTPUT_DIR / f"{result_data['base_name']}.mp3"
-                if saved_audio.exists():
+                p_name_for_audio = result_data.get("podcast_name", p_title)
+                saved_audio = find_output_file(result_data["base_name"], ".mp3", p_name_for_audio)
+                if saved_audio and saved_audio.exists():
                     st.audio(str(saved_audio))
                     with open(saved_audio, "rb") as af:
                         st.download_button(
@@ -1089,7 +1162,7 @@ with tab3:
                         st.caption("音声 URL が取得できませんでした。スキップします。")
                         continue
 
-                    if skip_already_processed and is_episode_processed(ep_g, ep_t, podcast_key):
+                    if skip_already_processed and is_episode_processed(ep_g, ep_t, podcast_key, p_title):
                         st.caption("処理済みのためスキップしました。")
                         continue
 
@@ -1139,8 +1212,9 @@ with tab4:
                 ja_sum = generate_japanese_summary(target_text, "en", llm_provider=llm_provider)
                 en_sum = generate_english_summary(target_text, "en", llm_provider=llm_provider)
 
-                (OUTPUT_DIR / f"{base_name}.summary.ja.txt").write_text(ja_sum, encoding="utf-8")
-                (OUTPUT_DIR / f"{base_name}.summary.en.txt").write_text(en_sum, encoding="utf-8")
+                text_summary_dir = get_podcast_output_dir("テキスト要約")
+                (text_summary_dir / f"{base_name}.summary.ja.txt").write_text(ja_sum, encoding="utf-8")
+                (text_summary_dir / f"{base_name}.summary.en.txt").write_text(en_sum, encoding="utf-8")
 
                 st.success("✅ 要約が生成されました！")
                 col_ja, col_en = st.columns(2)
@@ -1157,7 +1231,7 @@ with tab4:
 # ==========================================
 with tab5:
     st.subheader("📚 保存済み要約・文字起こし・音声アーカイブ")
-    all_files = list(OUTPUT_DIR.glob("*"))
+    all_files = [f for f in OUTPUT_DIR.rglob("*") if f.is_file()]
 
     if not all_files:
         st.info("まだ Output フォルダに出力ファイルがありません。")
@@ -1165,33 +1239,54 @@ with tab5:
         grouped_records = {}
         for f in all_files:
             name = f.name
+            rel_dir = f.parent.relative_to(OUTPUT_DIR)
+            category = str(rel_dir).replace("\\", "/") if str(rel_dir) != "." else "（未分類）"
+
             if name.endswith(".summary.ja.txt"):
                 base = name[:-len(".summary.ja.txt")]
-                grouped_records.setdefault(base, {})["ja"] = f
+                grouped_records.setdefault((category, base), {})["ja"] = f
             elif name.endswith(".summary.en.txt"):
                 base = name[:-len(".summary.en.txt")]
-                grouped_records.setdefault(base, {})["en"] = f
+                grouped_records.setdefault((category, base), {})["en"] = f
             elif name.endswith(".txt"):
                 base = name[:-len(".txt")]
-                grouped_records.setdefault(base, {})["txt"] = f
+                grouped_records.setdefault((category, base), {})["txt"] = f
             elif name.endswith(".mp3"):
                 base = name[:-len(".mp3")]
-                grouped_records.setdefault(base, {})["mp3"] = f
+                grouped_records.setdefault((category, base), {})["mp3"] = f
 
-        base_list = sorted(list(grouped_records.keys()), reverse=True)
-        search_query = st.text_input("🔍 アーカイブを検索（タイトルやGUID、キーワード）", "")
+        # ポッドキャスト番組一覧で絞り込み
+        all_categories = sorted(list({k[0] for k in grouped_records.keys()}))
+        filter_options = ["すべて表示"] + all_categories
+        col_cat_filter, col_srch = st.columns([1, 2])
+        with col_cat_filter:
+            selected_cat = st.selectbox("🎙️ ポッドキャストで絞り込み", filter_options, index=0)
+
+        # 候補一覧の生成
+        items = []
+        for (cat, base), rec in grouped_records.items():
+            if selected_cat != "すべて表示" and cat != selected_cat:
+                continue
+            display_label = f"[{cat}] {base}" if selected_cat == "すべて表示" else base
+            items.append((display_label, cat, base, rec))
+
+        items.sort(key=lambda x: x[0], reverse=True)
+
+        with col_srch:
+            search_query = st.text_input("🔍 アーカイブを検索（タイトルやGUID、キーワード）", "")
         if search_query.strip():
-            filtered_bases = [b for b in base_list if search_query.lower() in b.lower()]
-        else:
-            filtered_bases = base_list
+            items = [it for it in items if search_query.lower() in it[0].lower()]
 
-        if not filtered_bases:
+        if not items:
             st.info("検索条件に一致するアーカイブが見つかりませんでした。")
         else:
-            selected_base = st.selectbox("表示するアーカイブを選択", filtered_bases)
-            if selected_base:
-                rec = grouped_records[selected_base]
-                st.markdown(f"#### 📂 {selected_base}")
+            choice_labels = [it[0] for it in items]
+            selected_choice = st.selectbox("表示するアーカイブを選択", choice_labels)
+            matched_item = next((it for it in items if it[0] == selected_choice), None)
+
+            if matched_item:
+                display_label, cat, selected_base, rec = matched_item
+                st.markdown(f"#### 📂 {selected_base}  `({cat})`")
 
                 arc_tab1, arc_tab2, arc_tab3, arc_tab4 = st.tabs(["🇯🇵 日本語要約", "🇬🇧 英語要約", "📝 文字起こし全文", "🎧 音声 (MP3)"])
                 with arc_tab1:

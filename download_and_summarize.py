@@ -40,6 +40,43 @@ LAST_GUID_FILE = PROJECT_ROOT / "last_processed_guid.txt"
 OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 
+def get_podcast_output_dir(podcast_name: str | None = None) -> Path:
+    """
+    ポッドキャスト番組名に基づく保存先ディレクトリを返却（存在しない場合は自動作成）。
+    既存のサブフォルダ（例: 'まぼろし会議', 'Howard Marks', 'Behind the Markets'）との柔軟な一致を優先。
+    """
+    if not podcast_name or not podcast_name.strip():
+        folder = OUTPUT_DIR / "default"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    name = podcast_name.strip()
+    safe_name = sanitize_filename(name)
+
+    # 1. 完全一致する既存サブフォルダがあり、かつ中身がある場合は即座に再利用
+    direct_match = OUTPUT_DIR / safe_name
+    if direct_match.exists() and direct_match.is_dir() and any(direct_match.iterdir()):
+        return direct_match
+
+    # 2. 既存サブフォルダの部分一致探索（ファイルが存在するフォルダを優先）
+    matching_dirs = []
+    for d in OUTPUT_DIR.iterdir():
+        if d.is_dir():
+            d_name = d.name.lower()
+            if d_name and (d_name in name.lower() or name.lower() in d_name):
+                has_files = any(d.iterdir())
+                matching_dirs.append((has_files, d))
+
+    if matching_dirs:
+        # ファイルが存在するフォルダを最優先、次いで名前の適合度
+        matching_dirs.sort(key=lambda x: (not x[0], len(x[1].name)))
+        return matching_dirs[0][1]
+
+    folder = OUTPUT_DIR / safe_name
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
 def fetch_podcast_feed_info() -> tuple[dict, list[dict]]:
     """Pocket Casts Cache API からポッドキャスト情報とエピソード一覧を取得"""
     req = urllib.request.Request(
@@ -110,13 +147,19 @@ def main() -> int:
         print("ERROR: エピソードの MP3 ダウンロード URL が取得できませんでした。", file=sys.stderr)
         return 1
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    podcast_title = podcast_info.get("title", "")
+    target_dir = get_podcast_output_dir(podcast_title)
     safe_title = sanitize_filename(ep_title)
     output_base_name = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
 
-    audio_path = OUTPUT_DIR / f"{output_base_name}.mp3"
+    audio_path = target_dir / f"{output_base_name}.mp3"
+    # 旧直下ファイルの後方互換チェック
+    legacy_audio = OUTPUT_DIR / f"{output_base_name}.mp3"
     if audio_path.exists() and audio_path.stat().st_size > 0:
         print(f"既存のローカル音声ファイルを使用します: {audio_path}")
+    elif legacy_audio.exists() and legacy_audio.stat().st_size > 0:
+        print(f"既存の旧ルート音声ファイルを使用します: {legacy_audio}")
+        audio_path = legacy_audio
     else:
         print(f"音声ファイルをダウンロード中... ({ep_media_url})")
         req = urllib.request.Request(ep_media_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -135,7 +178,7 @@ def main() -> int:
     model = load_whisper_model(args.model)
     transcript_text, _ = transcribe_audio(model, audio_path, "auto")
 
-    transcript_path = OUTPUT_DIR / f"{output_base_name}.txt"
+    transcript_path = target_dir / f"{output_base_name}.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
     print(f"文字起こしテキスト保存完了: {transcript_path}")
 
@@ -144,8 +187,8 @@ def main() -> int:
     en_summary = generate_english_summary(transcript_text, "en")
     ja_summary = generate_japanese_summary(transcript_text, "en")
 
-    en_path = OUTPUT_DIR / f"{output_base_name}.summary.en.txt"
-    ja_path = OUTPUT_DIR / f"{output_base_name}.summary.ja.txt"
+    en_path = target_dir / f"{output_base_name}.summary.en.txt"
+    ja_path = target_dir / f"{output_base_name}.summary.ja.txt"
 
     en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
     ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
