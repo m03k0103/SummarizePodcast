@@ -85,27 +85,39 @@ def get_podcast_output_dir(podcast_name: str | None = None) -> Path:
 
 def find_output_file(output_base: str, suffix: str, podcast_name: str | None = None) -> Path | None:
     """
-    指定エピソードのファイルを探索して Path を返却（新サブフォルダ優先、旧ルート直下フォールバック）。
-    suffix 例: '.summary.ja.txt', '.mp3', '.txt'
+    指定エピソードのファイルを探索して Path を返却。
+    1. 完全一致: {output_base}{suffix}
+    2. タイトル後方一致: *_{output_base}{suffix} (プレフィックスの違いを吸収)
     """
     filename = f"{output_base}{suffix}"
 
-    # 1. 指定ポッドキャストのサブフォルダ内
+    # 探索先ディレクトリ（指定ポッドキャストフォルダ、および Output ルート）
+    dirs_to_check = []
     if podcast_name:
-        target_dir = get_podcast_output_dir(podcast_name)
-        p = target_dir / filename
+        dirs_to_check.append(get_podcast_output_dir(podcast_name))
+    dirs_to_check.append(OUTPUT_DIR)
+
+    # 1. 完全一致探索
+    for d in dirs_to_check:
+        p = d / filename
         if p.exists() and p.is_file():
             return p
 
-    # 2. Output 直下（後方互換性）
-    root_file = OUTPUT_DIR / filename
-    if root_file.exists() and root_file.is_file():
-        return root_file
-
-    # 3. Output 配下の全サブフォルダを再帰検索
+    # 2. 全サブフォルダ再帰探索（完全一致）
     matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
     if matched:
         return matched[0]
+
+    # 3. プレフィックスの違いを吸収するタイトル後方一致探索
+    # 例: output_base が 'タイトル' の場合、'*_タイトル{suffix}' を探索
+    for d in dirs_to_check:
+        matched_wild = [f for f in d.glob(f"*_{filename}") if f.is_file()]
+        if matched_wild:
+            return matched_wild[0]
+
+    matched_wild_all = [f for f in OUTPUT_DIR.rglob(f"*_{filename}") if f.is_file()]
+    if matched_wild_all:
+        return matched_wild_all[0]
 
     return None
 PODCAST_LIST_FILE = PROJECT_ROOT / "saved_podcasts.json"
@@ -190,6 +202,22 @@ def format_duration(seconds: int | float | None) -> str:
     if h > 0:
         return f"{h}時間{m:02d}分{s:02d}秒"
     return f"{m}分{s:02d}秒"
+
+
+def format_date_ymd(iso_str: str) -> str:
+    """エピソードの公開日時から YYYYMMDD 文字列を抽出（取得不能時は空文字）"""
+    if not iso_str:
+        return ""
+    try:
+        dt = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y%m%d")
+    except Exception:
+        import re
+        m = re.search(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", iso_str)
+        if m:
+            return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        return ""
 
 
 def format_date(iso_str: str) -> str:
@@ -307,15 +335,31 @@ def fetch_feed_data(url_or_uuid: str) -> tuple[dict, list[dict]]:
     return podcast_info, episodes
 
 
-def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", podcast_name: str = "") -> bool:
-    """エピソードが処理済みかどうかを判定（新サブフォルダまたは旧Outputファイルの存在 または GUID記録）"""
+def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", podcast_name: str = "", ep_published: str = "") -> bool:
+    """エピソードが処理済みかどうかを判定（YYYYMMDD または GUID プレフィックスのファイルの存在、または GUID 記録）"""
     safe_title = sanitize_filename(ep_title)
-    output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
-    ja_summary_file = find_output_file(output_base, ".summary.ja.txt", podcast_name)
-    if ja_summary_file and ja_summary_file.exists():
+
+    # 1. YYYYMMDD 形式での探索
+    ymd = format_date_ymd(ep_published)
+    if ymd:
+        output_base_ymd = f"{ymd}_{safe_title}"
+        ja_file = find_output_file(output_base_ymd, ".summary.ja.txt", podcast_name)
+        if ja_file and ja_file.exists():
+            return True
+
+    # 2. GUID 形式（旧形式）での探索
+    if ep_guid:
+        output_base_guid = f"{ep_guid}_{safe_title}"
+        ja_file = find_output_file(output_base_guid, ".summary.ja.txt", podcast_name)
+        if ja_file and ja_file.exists():
+            return True
+
+    # 3. プレフィックスなしでの探索
+    ja_file = find_output_file(safe_title, ".summary.ja.txt", podcast_name)
+    if ja_file and ja_file.exists():
         return True
-    
-    # GUID チェック
+
+    # 4. GUID チェック
     records = load_processed_guids()
     last_guid = records.get(podcast_key) or records.get("legacy", "")
     if ep_guid and ep_guid == last_guid:
@@ -639,11 +683,14 @@ def execute_episode_pipeline(
     gemini_key: str | None = None,
     gemini_model: str = "gemini-3.6-flash",
     podcast_name: str = "",
-    is_monologue: bool = False
+    is_monologue: bool = False,
+    ep_published: str = ""
 ):
     """1エピソードをダウンロード -> 文字起こし(Whisper or Gemini) -> 要約 -> 保存 -> GUID更新"""
     safe_title = sanitize_filename(ep_title)
-    output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
+    ymd = format_date_ymd(ep_published)
+    prefix = ymd if ymd else (ep_guid if ep_guid else "")
+    output_base = f"{prefix}_{safe_title}" if prefix else safe_title
 
     # ポッドキャストごとの保存先ディレクトリを取得
     target_dir = get_podcast_output_dir(podcast_name)
@@ -653,8 +700,11 @@ def execute_episode_pipeline(
     en_path = target_dir / f"{output_base}.summary.en.txt"
     audio_path = target_dir / f"{output_base}.mp3"
 
-    # 既存の音声ファイル探索（新サブフォルダ優先、旧ルート直下フォールバック）
+    # 既存の音声ファイル探索（新YYYYMMDD優先、旧GUIDフォールバック）
     existing_audio = find_output_file(output_base, ".mp3", podcast_name)
+    if not existing_audio and ep_guid:
+        legacy_base = f"{ep_guid}_{safe_title}"
+        existing_audio = find_output_file(legacy_base, ".mp3", podcast_name)
 
     if existing_audio and existing_audio.exists() and existing_audio.stat().st_size > 0:
         st.write(f"📁 **既存のローカル音声ファイルを使用します:** `{existing_audio.name}`")
@@ -907,7 +957,7 @@ with tab1:
         ep_published = latest_ep.get("published") or ""
         ep_duration = latest_ep.get("duration")
 
-        is_processed = is_episode_processed(ep_guid, ep_title, podcast_key)
+        is_processed = is_episode_processed(ep_guid, ep_title, podcast_key, p_title, ep_published)
 
         status_badge = '<span class="badge-done">✅ 処理済み (最新状態)</span>' if is_processed else '<span class="badge-new">🆕 新着エピソードあり（未処理）</span>'
         
@@ -965,7 +1015,8 @@ with tab1:
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
-                            is_monologue=tab1_is_monologue
+                            is_monologue=tab1_is_monologue,
+                            ep_published=ep_published
                         )
 
                         status.update(label="🎉 要約処理がすべて完了しました！", state="complete")
@@ -976,7 +1027,7 @@ with tab1:
                             "ja": ja_sum,
                             "en": en_sum,
                             "transcript": transcript,
-                            "base_name": f"{ep_guid}_{sanitize_filename(ep_title)}" if ep_guid else sanitize_filename(ep_title),
+                            "base_name": f"{format_date_ymd(ep_published) or ep_guid}_{sanitize_filename(ep_title)}" if (ep_published or ep_guid) else sanitize_filename(ep_title),
                             "podcast_name": p_title
                         }
                     except Exception as e:
@@ -987,8 +1038,12 @@ with tab1:
         result_data = st.session_state.get("last_result")
         if not result_data and is_processed:
             safe_title = sanitize_filename(ep_title)
-            output_base = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
+            ymd = format_date_ymd(ep_published)
+            output_base = f"{ymd}_{safe_title}" if ymd else f"{ep_guid}_{safe_title}"
             ja_file = find_output_file(output_base, ".summary.ja.txt", p_title)
+            if not ja_file and ep_guid:
+                output_base = f"{ep_guid}_{safe_title}"
+                ja_file = find_output_file(output_base, ".summary.ja.txt", p_title)
             en_file = find_output_file(output_base, ".summary.en.txt", p_title)
             txt_file = find_output_file(output_base, ".txt", p_title)
             if ja_file and ja_file.exists():
@@ -1074,7 +1129,7 @@ with tab2:
         t_pub = target_ep.get("published") or ""
         t_dur = target_ep.get("duration")
 
-        has_existing = is_episode_processed(t_guid, t_title, podcast_key)
+        has_existing = is_episode_processed(t_guid, t_title, podcast_key, p_title, t_pub)
 
         col_t1, col_t2 = st.columns([3, 1])
         with col_t1:
@@ -1114,7 +1169,8 @@ with tab2:
                         gemini_key=gemini_key_input,
                         gemini_model=gemini_asr_model,
                         podcast_name=p_title,
-                        is_monologue=tab2_is_monologue
+                        is_monologue=tab2_is_monologue,
+                        ep_published=t_pub
                     )
                     status.update(label="🎉 処理完了！", state="complete")
                     st.balloons()
@@ -1159,13 +1215,14 @@ with tab3:
                     ep_t = ep.get("title") or "Untitled"
                     ep_u = ep.get("url") or ep.get("media_url") or ""
                     ep_g = ep.get("uuid") or ep.get("id") or ""
+                    ep_pub = ep.get("published") or ""
                     
                     st.markdown(f"--- **[{idx}/{len(targets)}] {ep_t}** ---")
                     if not ep_u:
                         st.caption("音声 URL が取得できませんでした。スキップします。")
                         continue
 
-                    if skip_already_processed and is_episode_processed(ep_g, ep_t, podcast_key, p_title):
+                    if skip_already_processed and is_episode_processed(ep_g, ep_t, podcast_key, p_title, ep_pub):
                         st.caption("処理済みのためスキップしました。")
                         continue
 
@@ -1182,7 +1239,8 @@ with tab3:
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
-                            is_monologue=tab3_is_monologue
+                            is_monologue=tab3_is_monologue,
+                            ep_published=ep_pub
                         )
                     except Exception as e:
                         st.error(f"エラーが発生しました: {e}")

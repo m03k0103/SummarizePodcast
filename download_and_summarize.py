@@ -107,6 +107,23 @@ def save_last_processed_guid(guid: str) -> None:
     LAST_GUID_FILE.write_text(guid.strip(), encoding="utf-8")
 
 
+def format_date_ymd(iso_str: str) -> str:
+    """エピソードの公開日時から YYYYMMDD 文字列を抽出（取得不能時は空文字）"""
+    if not iso_str:
+        return ""
+    try:
+        import datetime
+        dt = datetime.datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y%m%d")
+    except Exception:
+        import re
+        m = re.search(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", iso_str)
+        if m:
+            return f"{m.group(1)}{m.group(2)}{m.group(3)}"
+        return ""
+
+
 def sanitize_filename(name: str) -> str:
     name = re.sub(r'[\\/*?:"<>|]', "", name)
     name = re.sub(r"\s+", "_", name)
@@ -149,8 +166,11 @@ def main() -> int:
 
     podcast_title = podcast_info.get("title", "")
     target_dir = get_podcast_output_dir(podcast_title)
+    ep_published = latest_ep.get("published", "")
+    ymd = format_date_ymd(ep_published)
+    prefix = ymd if ymd else (ep_guid if ep_guid else "")
     safe_title = sanitize_filename(ep_title)
-    output_base_name = f"{ep_guid}_{safe_title}" if ep_guid else safe_title
+    output_base_name = f"{prefix}_{safe_title}" if prefix else safe_title
 
     audio_path = target_dir / f"{output_base_name}.mp3"
     # 旧直下ファイルの後方互換チェック
