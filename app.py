@@ -782,13 +782,7 @@ else:
     if not gemini_key_input:
         st.sidebar.warning("⚠️ Gemini API Key を設定してください")
 
-dialogue_mode = st.sidebar.radio(
-    "出演者構成（話者分離設定）",
-    ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-    index=0,
-    help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
-)
-is_monologue = dialogue_mode.startswith("🎙️")
+
 
 
 
@@ -956,6 +950,16 @@ with tab1:
             with st.expander("🎧 音声をブラウザでプレビュー再生", expanded=False):
                 st.audio(ep_media_url)
 
+        tab1_dialogue_mode = st.radio(
+            "出演者構成（話者分離設定）",
+            ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+            index=0,
+            horizontal=True,
+            key="tab1_dialogue_mode",
+            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
+        )
+        tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
+
         col_exec1, col_exec2 = st.columns([2, 2])
         with col_exec1:
             force_run = st.checkbox("差分チェックを無視して強制的に再処理", value=False, key="force_run_tab1")
@@ -982,7 +986,7 @@ with tab1:
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
-                            is_monologue=is_monologue
+                            is_monologue=tab1_is_monologue
                         )
 
                         status.update(label="🎉 要約処理がすべて完了しました！", state="complete")
@@ -1106,6 +1110,16 @@ with tab2:
         if t_url:
             st.audio(t_url)
 
+        tab2_dialogue_mode = st.radio(
+            "出演者構成（話者分離設定）",
+            ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+            index=0,
+            horizontal=True,
+            key=f"tab2_dialogue_mode_{selected_idx}",
+            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
+        )
+        tab2_is_monologue = tab2_dialogue_mode.startswith("🎙️")
+
         if st.button(f"🚀 このエピソード ({t_title[:25]}...) を要約実行", key=f"run_ep_{selected_idx}", type="primary"):
             with st.status("エピソード処理を実行中...", expanded=True) as status:
                 try:
@@ -1121,7 +1135,7 @@ with tab2:
                         gemini_key=gemini_key_input,
                         gemini_model=gemini_asr_model,
                         podcast_name=p_title,
-                        is_monologue=is_monologue
+                        is_monologue=tab2_is_monologue
                     )
                     status.update(label="🎉 処理完了！", state="complete")
                     st.balloons()
@@ -1145,6 +1159,16 @@ with tab3:
         batch_count = st.number_input("処理する最新エピソード件数", min_value=1, max_value=30, value=3, step=1)
     with col_batch_skip:
         skip_already_processed = st.checkbox("処理済みのエピソードはスキップする", value=True)
+
+    tab3_dialogue_mode = st.radio(
+        "一括処理の出演者構成（話者分離設定）",
+        ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+        index=0,
+        horizontal=True,
+        key="tab3_dialogue_mode",
+        help="一括処理するエピソード群の出演者構成を指定します。"
+    )
+    tab3_is_monologue = tab3_dialogue_mode.startswith("🎙️")
 
     if st.button("⚡ 一括要約を開始", type="primary", key="batch_btn"):
         if not episodes:
@@ -1179,7 +1203,7 @@ with tab3:
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
-                            is_monologue=is_monologue
+                            is_monologue=tab3_is_monologue
                         )
                     except Exception as e:
                         st.error(f"エラーが発生しました: {e}")
