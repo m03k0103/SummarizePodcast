@@ -565,13 +565,16 @@ def transcribe_audio_with_gemini(
     api_key: str,
     model_name: str = "gemini-3.6-flash",
     podcast_title: str = "",
-    chunk_minutes: int = 15,
+    chunk_minutes: int | None = None,
     is_monologue: bool = False
 ) -> str:
     """
     Gemini Files REST API を用いて音声を文字起こし。
-    長尺音声（15分超）は自動でチャンク分割し、前パートの話者情報・会話コンテキストを引き継ぎながら順次文字起こし・結合する。
+    長尺音声（一人語り時は45分超、対談時は15分超）は自動でチャンク分割し、前パートの話者情報・会話コンテキストを引き継ぎながら順次文字起こし・結合する。
     """
+    if chunk_minutes is None:
+        chunk_minutes = 45 if is_monologue else 15
+
     ffmpeg_path = find_ffmpeg()
     duration_sec = 0.0
     if ffmpeg_path:
