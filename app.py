@@ -794,47 +794,13 @@ if ffmpeg_path:
 else:
     st.sidebar.error("❌ FFmpeg 未検出 (音声変換に必要です)")
 
-st.sidebar.markdown("---")
-st.sidebar.subheader("📌 登録ポッドキャスト管理")
-saved_podcasts = load_saved_podcasts()
-
-with st.sidebar.expander("登録済み番組の確認・削除", expanded=False):
-    if not saved_podcasts:
-        st.caption("登録番組はありません")
-    else:
-        for idx, p_item in enumerate(saved_podcasts):
-            col_p1, col_p2 = st.columns([4, 1])
-            with col_p1:
-                st.write(f"• **{p_item['name']}**")
-            with col_p2:
-                if st.button("🗑️", key=f"del_pod_{idx}", help=f"「{p_item['name']}」を削除"):
-                    saved_podcasts.pop(idx)
-                    save_saved_podcasts(saved_podcasts)
-                    if st.session_state.get("selected_podcast_name") == p_item["name"]:
-                        st.session_state["selected_podcast_name"] = saved_podcasts[0]["name"] if saved_podcasts else "✏️ URLを直接指定"
-                    st.rerun()
-
-with st.sidebar.expander("手動で番組を追加", expanded=False):
-    new_pod_name = st.text_input("番組名", placeholder="例: The Daily")
-    new_pod_url = st.text_input("Pocket Casts URL または UUID", placeholder="https://pocketcasts.com/podcast/...")
-    if st.button("➕ 追加する", use_container_width=True):
-        if new_pod_name.strip() and new_pod_url.strip():
-            saved_podcasts.append({"name": new_pod_name.strip(), "url": new_pod_url.strip()})
-            save_saved_podcasts(saved_podcasts)
-            st.session_state["selected_podcast_name"] = new_pod_name.strip()
-            st.success(f"「{new_pod_name}」を追加しました")
-            st.rerun()
-        else:
-            st.warning("番組名とURLを入力してください")
-
-
 # --- メインエリア ---
 st.markdown('<div class="main-header">🎙️ Podcast AI Summarizer</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-header">任意のポッドキャストを自動監視 ➔ ダウンロード ➔ Whisper 文字起こし ➔ AI 日英要約</div>', unsafe_allow_html=True)
 
 # ポッドキャスト選択・入力バー
+saved_podcasts = load_saved_podcasts()
 st.markdown("### 📻 対象ポッドキャストの指定")
-col_sel, col_custom = st.columns([1, 2])
 
 podcast_options = [p["name"] for p in saved_podcasts] + ["✏️ URLを直接指定"]
 default_idx = 0
@@ -842,9 +808,22 @@ current_selected = st.session_state.get("selected_podcast_name")
 if current_selected in podcast_options:
     default_idx = podcast_options.index(current_selected)
 
+col_sel, col_del, col_custom = st.columns([5, 1, 6])
+
 with col_sel:
     selected_option = st.selectbox("登録済み番組から選択", podcast_options, index=default_idx)
     st.session_state["selected_podcast_name"] = selected_option
+
+with col_del:
+    st.write("")
+    st.write("")
+    if selected_option != "✏️ URLを直接指定":
+        if st.button("🗑️", key="del_selected_pod", help=f"「{selected_option}」を登録から削除"):
+            saved_podcasts = [p for p in saved_podcasts if p["name"] != selected_option]
+            save_saved_podcasts(saved_podcasts)
+            st.session_state["selected_podcast_name"] = saved_podcasts[0]["name"] if saved_podcasts else "✏️ URLを直接指定"
+            st.toast(f"🗑️ 「{selected_option}」の登録を解除しました", icon="ℹ️")
+            st.rerun()
 
 with col_custom:
     if selected_option == "✏️ URLを直接指定":
