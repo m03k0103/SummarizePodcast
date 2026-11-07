@@ -233,20 +233,27 @@ def format_date(iso_str: str) -> str:
 
 def load_saved_podcasts() -> list[dict]:
     """登録済みポッドキャスト一覧を取得"""
+    podcasts = []
     if PODCAST_LIST_FILE.exists():
         try:
-            return json.loads(PODCAST_LIST_FILE.read_text(encoding="utf-8"))
+            podcasts = json.loads(PODCAST_LIST_FILE.read_text(encoding="utf-8"))
         except Exception:
-            pass
-    # デフォルト候補
-    default_list = [
-        {
-            "name": "Behind the Markets Podcast",
-            "url": "https://pocketcasts.com/podcast/behind-the-markets-podcast/13110350-be7f-0134-10a8-25324e2a541d"
-        }
-    ]
-    save_saved_podcasts(default_list)
-    return default_list
+            podcasts = []
+    if not podcasts:
+        # デフォルト候補
+        podcasts = [
+            {
+                "name": "Behind the Markets Podcast",
+                "url": "https://pocketcasts.com/podcast/behind-the-markets-podcast/13110350-be7f-0134-10a8-25324e2a541d",
+                "default_is_monologue": False
+            }
+        ]
+        save_saved_podcasts(podcasts)
+    else:
+        for p in podcasts:
+            if "default_is_monologue" not in p:
+                p["default_is_monologue"] = False
+    return podcasts
 
 
 def save_saved_podcasts(podcasts: list[dict]) -> None:
@@ -878,13 +885,28 @@ with col_del:
             st.toast(f"🗑️ 「{selected_option}」の登録を解除しました", icon="ℹ️")
             st.rerun()
 
+active_entry = next((p for p in saved_podcasts if p["name"] == selected_option), None)
+current_podcast_is_monologue = active_entry.get("default_is_monologue", False) if active_entry else False
+
 with col_custom:
     if selected_option == "✏️ URLを直接指定":
         active_url = st.text_input("Pocket Casts 番組 URL または UUID (入力すると自動保存されます)", placeholder="https://pocketcasts.com/podcast/...")
     else:
-        active_entry = next((p for p in saved_podcasts if p["name"] == selected_option), None)
         active_url = active_entry["url"] if active_entry else ""
-        st.text_input("対象 URL / UUID", value=active_url, disabled=True)
+        selected_default_mode = st.radio(
+            "⚙️ 番組の標準構成（デフォルト）",
+            ["👥 複数人（対談）", "🎙️ 単独（一人語り）"],
+            index=1 if current_podcast_is_monologue else 0,
+            horizontal=True,
+            key=f"default_speaker_mode_{selected_option}",
+            help="この番組のエピソード要約時に初期選択される構成です。エピソード実行時に個別に切り替えることも可能です。"
+        )
+        new_default_mono = selected_default_mode.startswith("🎙️")
+        if active_entry and new_default_mono != current_podcast_is_monologue:
+            active_entry["default_is_monologue"] = new_default_mono
+            save_saved_podcasts(saved_podcasts)
+            st.toast(f"💾 「{selected_option}」の標準構成を【{'単独（一人語り）' if new_default_mono else '複数人（対談）'}】に更新しました", icon="✅")
+            st.rerun()
 
 # ポッドキャストデータ取得
 podcast_info, episodes = {}, []
@@ -907,7 +929,11 @@ if selected_option == "✏️ URLを直接指定" and active_url.strip() and epi
             final_name = f"{p_title} ({counter})"
             counter += 1
 
-        saved_podcasts.append({"name": final_name, "url": active_url.strip()})
+        saved_podcasts.append({
+            "name": final_name,
+            "url": active_url.strip(),
+            "default_is_monologue": False
+        })
         save_saved_podcasts(saved_podcasts)
         st.session_state["selected_podcast_name"] = final_name
         st.toast(f"📌 「{final_name}」を登録済み番組として自動保存しました！", icon="✅")
@@ -985,10 +1011,10 @@ with tab1:
         tab1_dialogue_mode = st.radio(
             "出演者構成（話者分離設定）",
             ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-            index=0,
+            index=1 if current_podcast_is_monologue else 0,
             horizontal=True,
-            key="tab1_dialogue_mode",
-            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
+            key=f"tab1_dialogue_mode_{podcast_key}",
+            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。このエピソード固有の構成に合わせて個別に切り替え可能です。"
         )
         tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
 
@@ -1150,10 +1176,10 @@ with tab2:
         tab2_dialogue_mode = st.radio(
             "出演者構成（話者分離設定）",
             ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-            index=0,
+            index=1 if current_podcast_is_monologue else 0,
             horizontal=True,
-            key=f"tab2_dialogue_mode_{selected_idx}",
-            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。"
+            key=f"tab2_dialogue_mode_{podcast_key}_{selected_idx}",
+            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。このエピソード固有の構成に合わせて個別に切り替え可能です。"
         )
         tab2_is_monologue = tab2_dialogue_mode.startswith("🎙️")
 
@@ -1201,10 +1227,10 @@ with tab3:
     tab3_dialogue_mode = st.radio(
         "一括処理の出演者構成（話者分離設定）",
         ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-        index=0,
+        index=1 if current_podcast_is_monologue else 0,
         horizontal=True,
-        key="tab3_dialogue_mode",
-        help="一括処理するエピソード群の出演者構成を指定します。"
+        key=f"tab3_dialogue_mode_{podcast_key}",
+        help="一括処理するエピソード群の出演者構成を指定します（デフォルト: この番組の標準設定）。"
     )
     tab3_is_monologue = tab3_dialogue_mode.startswith("🎙️")
 
