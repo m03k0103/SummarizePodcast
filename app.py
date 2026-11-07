@@ -13,6 +13,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import pandas as pd
 import streamlit as st
 
 # Source フォルダからモジュールインポート
@@ -686,6 +687,44 @@ def transcribe_audio_with_gemini(
 
 
 
+def download_episode_audio(
+    ep_title: str,
+    ep_media_url: str,
+    podcast_name: str = "",
+    ep_published: str = "",
+    ep_guid: str = ""
+) -> tuple[Path, bool]:
+    """
+    エピソードの音声（.mp3）をダウンロードして保存。
+    既存ファイルが存在する場合はダウンロードをスキップしてそのパスを返却。
+    戻り値: (audio_path, is_downloaded: bool)
+    """
+    safe_title = sanitize_filename(ep_title)
+    ymd = format_date_ymd(ep_published)
+    prefix = ymd if ymd else (ep_guid if ep_guid else "")
+    output_base = f"{prefix}_{safe_title}" if prefix else safe_title
+
+    target_dir = get_podcast_output_dir(podcast_name)
+    audio_path = target_dir / f"{output_base}.mp3"
+
+    existing_audio = find_output_file(output_base, ".mp3", podcast_name)
+    if not existing_audio and ep_guid:
+        legacy_base = f"{ep_guid}_{safe_title}"
+        existing_audio = find_output_file(legacy_base, ".mp3", podcast_name)
+
+    if existing_audio and existing_audio.exists() and existing_audio.stat().st_size > 0:
+        return existing_audio, False
+
+    if not ep_media_url:
+        raise ValueError(f"エピソード「{ep_title}」の音声 URL が取得できませんでした。")
+
+    req = urllib.request.Request(ep_media_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=120) as resp, open(audio_path, "wb") as out:
+        shutil.copyfileobj(resp, out)
+
+    return audio_path, True
+
+
 def execute_episode_pipeline(
     ep_title: str,
     ep_guid: str,
@@ -959,21 +998,20 @@ if podcast_info and episodes:
 """, unsafe_allow_html=True)
 
 
-# タブ構成
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📻 最新エピソード監視 & 要約",
-    "📋 エピソード一覧から要約",
-    "⚡ 複数エピソード一括要約",
+# タブ構成 (エピソード一覧・テキスト要約・アーカイブの3大構成)
+tab1, tab2, tab3 = st.tabs([
+    "📋 エピソード一覧 & 要約処理",
     "📄 テキストファイル要約",
     "📚 要約アーカイブ閲覧"
 ])
 
 
 # ==========================================
-# タブ 1: 📻 最新エピソード監視 & 要約
+# タブ 1: 📋 エピソード一覧 & 要約処理 (統合タブ)
 # ==========================================
 with tab1:
-    st.subheader("最新エピソード監視ステータス")
+    st.subheader("📋 エピソード一覧 & 処理ステータス")
+    st.caption("ポッドキャストの全エピソードの音声・要約の処理状況を確認し、チェックボックスで選択して「音声ダウンロードのみ」または「要約実行」を行えます。")
 
     col_btn, col_blank = st.columns([1, 4])
     with col_btn:
@@ -982,118 +1020,234 @@ with tab1:
             st.rerun()
 
     if not episodes:
-        st.info("ポッドキャストのURLを指定すると、最新エピソードの監視ステータスが表示されます。")
+        st.info("ポッドキャストのURLを指定すると、エピソード一覧が表示されます。")
     else:
-        latest_ep = episodes[0]
-        ep_guid = latest_ep.get("uuid") or latest_ep.get("id") or latest_ep.get("url") or ""
-        ep_title = latest_ep.get("title") or "Untitled Episode"
-        ep_media_url = latest_ep.get("url") or latest_ep.get("media_url") or ""
-        ep_published = latest_ep.get("published") or ""
-        ep_duration = latest_ep.get("duration")
+        # エピソードごとの処理状態を判定
+        table_rows = []
+        for idx, ep in enumerate(episodes):
+            t_title = ep.get("title") or "Untitled Episode"
+            t_guid = ep.get("uuid") or ep.get("id") or ep.get("url") or ""
+            t_pub = ep.get("published") or ""
+            t_dur = ep.get("duration")
+            t_url = ep.get("url") or ep.get("media_url") or ""
+            safe_title = sanitize_filename(t_title)
+            ymd = format_date_ymd(t_pub)
+            prefix = ymd if ymd else (t_guid if t_guid else "")
+            output_base = f"{prefix}_{safe_title}" if prefix else safe_title
 
-        is_processed = is_episode_processed(ep_guid, ep_title, podcast_key, p_title, ep_published)
+            audio_file = find_output_file(output_base, ".mp3", p_title)
+            has_audio = bool(audio_file and audio_file.exists() and audio_file.stat().st_size > 0)
+            summary_file = find_output_file(output_base, ".summary.ja.md", p_title)
+            has_summary = bool(summary_file and summary_file.exists())
 
-        status_badge = '<span class="badge-done">✅ 処理済み (最新状態)</span>' if is_processed else '<span class="badge-new">🆕 新着エピソードあり（未処理）</span>'
+            table_rows.append({
+                "選択": False,
+                "No": idx + 1,
+                "公開日": ymd if ymd else format_date(t_pub),
+                "タイトル": t_title,
+                "再生時間": format_duration(t_dur),
+                "音声データ": "✅ 済" if has_audio else "⏳ 未",
+                "要約データ": "✅ 済" if has_summary else "⏳ 未",
+                "_idx": idx,
+                "_has_audio": has_audio,
+                "_has_summary": has_summary
+            })
+
+        df_episodes = pd.DataFrame(table_rows)
+
+        # クイック選択ツールバー
+        col_q1, col_q2, col_q3, col_q4, col_q_space = st.columns([1.5, 1.5, 1.2, 1.2, 3])
         
-        st.markdown(f"""
-<div class="podcast-card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.8rem;">
-        <span style="font-size: 1.15rem; font-weight: bold;">{ep_title}</span>
-        {status_badge}
-    </div>
-    <div style="font-size: 0.9rem; color: #6B7280; line-height: 1.6;">
-        📅 <b>公開日時:</b> {format_date(ep_published)} &nbsp;&nbsp;|&nbsp;&nbsp; 
-        ⏱️ <b>再生時間:</b> {format_duration(ep_duration)} &nbsp;&nbsp;|&nbsp;&nbsp; 
-        🆔 <b>エピソード GUID:</b> <code>{ep_guid if ep_guid else '自動生成'}</code>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+        # 選択状態のセッションキー管理
+        select_state_key = f"selected_rows_{podcast_key}"
+        if select_state_key not in st.session_state:
+            st.session_state[select_state_key] = [False] * len(episodes)
+        elif len(st.session_state[select_state_key]) != len(episodes):
+            st.session_state[select_state_key] = [False] * len(episodes)
 
-        if ep_media_url:
-            with st.expander("🎧 音声をブラウザでプレビュー再生", expanded=False):
-                st.audio(ep_media_url)
+        with col_q1:
+            if st.button("🆕 最新回を選択", use_container_width=True):
+                new_state = [False] * len(episodes)
+                if new_state:
+                    new_state[0] = True
+                st.session_state[select_state_key] = new_state
+                st.rerun()
 
-        tab1_dialogue_mode = st.radio(
-            "出演者構成（話者分離設定）",
-            ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-            index=1 if current_podcast_is_monologue else 0,
-            horizontal=True,
-            key=f"tab1_dialogue_mode_{podcast_key}",
-            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。このエピソード固有の構成に合わせて個別に切り替え可能です。"
+        with col_q2:
+            if st.button("⚡ 未処理を選択", use_container_width=True):
+                st.session_state[select_state_key] = [not row["_has_summary"] for row in table_rows]
+                st.rerun()
+
+        with col_q3:
+            if st.button("☑️ 全選択", use_container_width=True):
+                st.session_state[select_state_key] = [True] * len(episodes)
+                st.rerun()
+
+        with col_q4:
+            if st.button("⬜ 全解除", use_container_width=True):
+                st.session_state[select_state_key] = [False] * len(episodes)
+                st.rerun()
+
+        # セッションの選択状態を DataFrame に適用
+        df_episodes["選択"] = st.session_state[select_state_key]
+
+        # エピソード一覧表 (st.data_editor)
+        edited_df = st.data_editor(
+            df_episodes[["選択", "No", "公開日", "タイトル", "再生時間", "音声データ", "要約データ", "_idx"]],
+            hide_index=True,
+            disabled=["No", "公開日", "タイトル", "再生時間", "音声データ", "要約データ"],
+            column_config={
+                "選択": st.column_config.CheckboxColumn("選択", default=False, width="small"),
+                "No": st.column_config.NumberColumn("No", width="small"),
+                "公開日": st.column_config.TextColumn("公開日", width="small"),
+                "タイトル": st.column_config.TextColumn("タイトル", width="large"),
+                "再生時間": st.column_config.TextColumn("時間", width="small"),
+                "音声データ": st.column_config.TextColumn("音声データ", width="small"),
+                "要約データ": st.column_config.TextColumn("要約データ", width="small"),
+                "_idx": None  # 非表示
+            },
+            use_container_width=True,
+            key=f"ep_editor_{podcast_key}"
         )
-        tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
 
-        col_exec1, col_exec2 = st.columns([2, 2])
-        with col_exec1:
-            force_run = st.checkbox("差分チェックを無視して強制的に再処理", value=False, key="force_run_tab1")
-        with col_exec2:
-            can_run = not is_processed or force_run
-            btn_label = "🚀 最新エピソードを要約実行" if can_run else "✅ 最新エピソードは処理済みです（強制再処理で実行可能）"
-            run_btn = st.button(btn_label, type="primary" if can_run else "secondary", disabled=not can_run, use_container_width=True)
+        # 現在選択されているインデックスを取得
+        selected_indices = edited_df[edited_df["選択"] == True]["_idx"].tolist()
+        st.session_state[select_state_key] = edited_df["選択"].tolist()
 
-        if run_btn:
-            if not ep_media_url:
-                st.error("エピソードの音声 URL が取得できませんでした。")
-            else:
-                with st.status("エピソードのダウンロード・要約処理を実行中...", expanded=True) as status:
+        # 実行設定 & アクションバー
+        st.markdown("---")
+        st.markdown(f"#### ⚙️ 実行設定 & アクション （選択中: **{len(selected_indices)}** 件）")
+
+        col_cfg1, col_cfg2 = st.columns([1, 1])
+        with col_cfg1:
+            tab1_dialogue_mode = st.radio(
+                "出演者構成（話者分離設定）",
+                ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+                index=1 if current_podcast_is_monologue else 0,
+                horizontal=True,
+                key=f"tab1_dialogue_mode_{podcast_key}",
+                help="選択したエピソード群の出演者構成を指定します（デフォルト: この番組の標準設定）。個別の対談回・一人語り回に合わせて変更可能です。"
+            )
+            tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
+
+        with col_cfg2:
+            skip_already_processed = st.checkbox("要約済みのエピソードはスキップする", value=True, key="skip_done_unified")
+            force_run = st.checkbox("差分チェックを無視して強制的に再処理", value=False, key="force_run_unified")
+
+        col_act1, col_act2 = st.columns([1, 1])
+        with col_act1:
+            btn_audio_only = st.button(
+                "📥 選択エピソードの音声をダウンロードのみ実行",
+                disabled=len(selected_indices) == 0,
+                use_container_width=True,
+                help="音声ファイル（.mp3）のみを取得・保存します。Gemini API などの要約クォータを一切消費しません。"
+            )
+        with col_act2:
+            btn_summarize = st.button(
+                "🚀 選択エピソードの要約を実行",
+                type="primary",
+                disabled=len(selected_indices) == 0,
+                use_container_width=True,
+                help="音声取得（既存があれば再利用）➔ 文字起こし ➔ 日英要約作成を順次実行します。"
+            )
+
+        # アクション 1: 音声ダウンロードのみ
+        if btn_audio_only:
+            with st.status(f"選択された {len(selected_indices)} 件の音声をダウンロード中...", expanded=True) as status:
+                dl_count = 0
+                reuse_count = 0
+                for rank, s_idx in enumerate(selected_indices, start=1):
+                    ep = episodes[s_idx]
+                    t_title = ep.get("title") or "Untitled Episode"
+                    t_media_url = ep.get("url") or ep.get("media_url") or ""
+                    t_published = ep.get("published") or ""
+                    t_guid = ep.get("uuid") or ep.get("id") or ""
+                    st.write(f"[{rank}/{len(selected_indices)}] `{t_title}` を取得中...")
+                    try:
+                        audio_path, is_downloaded = download_episode_audio(
+                            ep_title=t_title,
+                            ep_media_url=t_media_url,
+                            podcast_name=p_title,
+                            ep_published=t_published,
+                            ep_guid=t_guid
+                        )
+                        if is_downloaded:
+                            st.write(f"  ✅ ダウンロード完了: `{audio_path.name}`")
+                            dl_count += 1
+                        else:
+                            st.write(f"  📁 既存のローカル音声ファイルを使用: `{audio_path.name}`")
+                            reuse_count += 1
+                    except Exception as e:
+                        st.error(f"  ❌ 取得失敗: {e}")
+                status.update(label=f"🎉 音声ダウンロード完了！（新規保存: {dl_count} 件, 既存利用: {reuse_count} 件）", state="complete")
+                st.toast(f"📥 音声保存完了: 新規 {dl_count} 件 / 既存 {reuse_count} 件", icon="✅")
+                st.rerun()
+
+        # アクション 2: 要約実行
+        if btn_summarize:
+            with st.status(f"選択された {len(selected_indices)} 件の要約処理を実行中...", expanded=True) as status:
+                success_count = 0
+                skip_count = 0
+                last_result_summary = None
+
+                for rank, s_idx in enumerate(selected_indices, start=1):
+                    ep = episodes[s_idx]
+                    t_title = ep.get("title") or "Untitled Episode"
+                    t_media_url = ep.get("url") or ep.get("media_url") or ""
+                    t_guid = ep.get("uuid") or ep.get("id") or ep.get("url") or ""
+                    t_published = ep.get("published") or ""
+
+                    # 処理済みチェック
+                    is_done = is_episode_processed(t_guid, t_title, podcast_key, p_title, t_published)
+                    if is_done and skip_already_processed and not force_run:
+                        st.write(f"[{rank}/{len(selected_indices)}] ⏭️ `{t_title}`: 処理済みのためスキップ")
+                        skip_count += 1
+                        continue
+
+                    st.write(f"[{rank}/{len(selected_indices)}] 🚀 **`{t_title}` の処理を開始...**")
                     try:
                         transcript, ja_sum, en_sum = execute_episode_pipeline(
-                            ep_title=ep_title,
-                            ep_guid=ep_guid,
-                            ep_media_url=ep_media_url,
+                            ep_title=t_title,
+                            ep_guid=t_guid,
+                            ep_media_url=t_media_url,
                             model_size=whisper_model,
                             llm_prov=llm_provider,
                             podcast_key=podcast_key,
-                            is_latest=True,
+                            is_latest=(s_idx == 0),
                             asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
                             gemini_key=gemini_key_input,
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
                             is_monologue=tab1_is_monologue,
-                            ep_published=ep_published
+                            ep_published=t_published
                         )
-
-                        status.update(label="🎉 要約処理がすべて完了しました！", state="complete")
-                        st.balloons()
-
-                        st.session_state["last_result"] = {
-                            "title": ep_title,
+                        success_count += 1
+                        safe_title = sanitize_filename(t_title)
+                        ymd = format_date_ymd(t_published)
+                        output_base = f"{ymd}_{safe_title}" if ymd else f"{t_guid}_{safe_title}"
+                        last_result_summary = {
+                            "title": t_title,
                             "ja": ja_sum,
                             "en": en_sum,
                             "transcript": transcript,
-                            "base_name": f"{format_date_ymd(ep_published) or ep_guid}_{sanitize_filename(ep_title)}" if (ep_published or ep_guid) else sanitize_filename(ep_title),
+                            "base_name": output_base,
                             "podcast_name": p_title
                         }
                     except Exception as e:
-                        status.update(label=f"❌ エラーが発生しました: {e}", state="error")
-                        st.exception(e)
+                        st.error(f"❌ エピソード「{t_title}」の処理中にエラーが発生しました: {e}")
 
-        # 直前または最新の要約結果表示
+                status.update(label=f"🎉 要約処理完了！（成功: {success_count} 件, スキップ: {skip_count} 件）", state="complete")
+                if last_result_summary:
+                    st.session_state["last_result"] = last_result_summary
+                st.balloons()
+                st.rerun()
+
+        # 直前の要約結果表示（単一エピソード処理後または選択時）
         result_data = st.session_state.get("last_result")
-        if not result_data and is_processed:
-            safe_title = sanitize_filename(ep_title)
-            ymd = format_date_ymd(ep_published)
-            output_base = f"{ymd}_{safe_title}" if ymd else f"{ep_guid}_{safe_title}"
-            ja_file = find_output_file(output_base, ".summary.ja.md", p_title)
-            if not ja_file and ep_guid:
-                output_base = f"{ep_guid}_{safe_title}"
-                ja_file = find_output_file(output_base, ".summary.ja.md", p_title)
-            en_file = find_output_file(output_base, ".summary.en.md", p_title)
-            txt_file = find_output_file(output_base, ".txt", p_title)
-            if ja_file and ja_file.exists():
-                result_data = {
-                    "title": ep_title,
-                    "ja": ja_file.read_text(encoding="utf-8"),
-                    "en": en_file.read_text(encoding="utf-8", errors="ignore") if en_file and en_file.exists() else "",
-                    "transcript": txt_file.read_text(encoding="utf-8", errors="ignore") if txt_file and txt_file.exists() else "",
-                    "base_name": output_base,
-                    "podcast_name": p_title
-                }
-
         if result_data:
             st.markdown("---")
-            st.subheader(f"📄 要約・文字起こし結果: {result_data['title']}")
-            
+            st.subheader(f"📄 最新の要約・文字起こし結果: {result_data['title']}")
+
             res_tab1, res_tab2, res_tab3, res_tab4 = st.tabs(["🇯🇵 日本語要約", "🇬🇧 英語要約", "📝 全文文字起こし", "🎧 音声 (MP3)"])
             with res_tab1:
                 st.download_button(
@@ -1123,170 +1277,19 @@ with tab1:
                 st.text_area("文字起こし本文", value=result_data["transcript"], height=400)
 
             with res_tab4:
-                p_name_for_audio = result_data.get("podcast_name", p_title)
-                saved_audio = find_output_file(result_data["base_name"], ".mp3", p_name_for_audio)
-                if saved_audio and saved_audio.exists():
-                    st.audio(str(saved_audio))
-                    with open(saved_audio, "rb") as af:
-                        st.download_button(
-                            "📥 音声ファイル (.mp3) をダウンロード",
-                            data=af.read(),
-                            file_name=saved_audio.name,
-                            mime="audio/mpeg"
-                        )
+                p_name = result_data.get("podcast_name", "")
+                af = find_output_file(result_data["base_name"], ".mp3", p_name)
+                if af and af.exists():
+                    st.audio(str(af))
+                    with open(af, "rb") as f_bin:
+                        st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=f_bin.read(), file_name=af.name, mime="audio/mpeg")
                 else:
-                    st.caption("ローカル音声ファイルはありません")
-
-
+                    st.caption("ローカル音声ファイルがありません")
 
 # ==========================================
-# タブ 2: 📋 エピソード一覧から要約
+# タブ 2: 📄 テキストファイル要約
 # ==========================================
 with tab2:
-    st.subheader("エピソード一覧から選択して要約")
-    st.caption("選択中ポッドキャストの過去エピソードから任意の回を選んで、個別にダウンロード・文字起こし・要約を実行できます。")
-
-    if not episodes:
-        st.info("ポッドキャストを指定してください。")
-    else:
-        ep_options = []
-        for i, ep in enumerate(episodes[:50]):
-            title = ep.get("title", "Untitled")
-            pub = format_date(ep.get("published", ""))
-            ep_options.append(f"{i+1}. {title} ({pub})")
-
-        selected_idx = st.selectbox("処理対象のエピソードを選択", range(len(ep_options)), format_func=lambda x: ep_options[x])
-        target_ep = episodes[selected_idx]
-        t_guid = target_ep.get("uuid") or target_ep.get("id") or ""
-        t_title = target_ep.get("title") or "Untitled"
-        t_url = target_ep.get("url") or target_ep.get("media_url") or ""
-        t_pub = target_ep.get("published") or ""
-        t_dur = target_ep.get("duration")
-
-        has_existing = is_episode_processed(t_guid, t_title, podcast_key, p_title, t_pub)
-
-        col_t1, col_t2 = st.columns([3, 1])
-        with col_t1:
-            st.markdown(f"**エピソード名:** {t_title}")
-            st.caption(f"公開日: {format_date(t_pub)} | 再生時間: {format_duration(t_dur)} | GUID: `{t_guid}`")
-        with col_t2:
-            if has_existing:
-                st.success("✅ 処理済みデータあり")
-            else:
-                st.warning("⏳ 未処理")
-
-        if t_url:
-            st.audio(t_url)
-
-        tab2_dialogue_mode = st.radio(
-            "出演者構成（話者分離設定）",
-            ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-            index=1 if current_podcast_is_monologue else 0,
-            horizontal=True,
-            key=f"tab2_dialogue_mode_{podcast_key}_{selected_idx}",
-            help="「対談・複数人」では話者ごとにラベルや名前を識別します。「一人語り」では話者ラベルを付与せず自然な文章として書き起こします。このエピソード固有の構成に合わせて個別に切り替え可能です。"
-        )
-        tab2_is_monologue = tab2_dialogue_mode.startswith("🎙️")
-
-        if st.button(f"🚀 このエピソード ({t_title[:25]}...) を要約実行", key=f"run_ep_{selected_idx}", type="primary"):
-            with st.status("エピソード処理を実行中...", expanded=True) as status:
-                try:
-                    transcript, ja_sum, en_sum = execute_episode_pipeline(
-                        ep_title=t_title,
-                        ep_guid=t_guid,
-                        ep_media_url=t_url,
-                        model_size=whisper_model,
-                        llm_prov=llm_provider,
-                        podcast_key=podcast_key,
-                        is_latest=False,
-                        asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
-                        gemini_key=gemini_key_input,
-                        gemini_model=gemini_asr_model,
-                        podcast_name=p_title,
-                        is_monologue=tab2_is_monologue,
-                        ep_published=t_pub
-                    )
-                    status.update(label="🎉 処理完了！", state="complete")
-                    st.balloons()
-                    
-                    st.markdown("### 🇯🇵 日本語要約")
-                    st.markdown(ja_sum)
-                    st.markdown("### 🇬🇧 英語要約")
-                    st.markdown(en_sum)
-                except Exception as e:
-                    status.update(label=f"❌ エラー: {e}", state="error")
-                    st.exception(e)
-
-
-# ==========================================
-# タブ 3: ⚡ 複数エピソード一括要約
-# ==========================================
-with tab3:
-    st.subheader("複数エピソードの一括（バッチ）ダウンロード＆要約")
-    col_batch_cnt, col_batch_skip = st.columns([2, 2])
-    with col_batch_cnt:
-        batch_count = st.number_input("処理する最新エピソード件数", min_value=1, max_value=30, value=3, step=1)
-    with col_batch_skip:
-        skip_already_processed = st.checkbox("処理済みのエピソードはスキップする", value=True)
-
-    tab3_dialogue_mode = st.radio(
-        "一括処理の出演者構成（話者分離設定）",
-        ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
-        index=1 if current_podcast_is_monologue else 0,
-        horizontal=True,
-        key=f"tab3_dialogue_mode_{podcast_key}",
-        help="一括処理するエピソード群の出演者構成を指定します（デフォルト: この番組の標準設定）。"
-    )
-    tab3_is_monologue = tab3_dialogue_mode.startswith("🎙️")
-
-    if st.button("⚡ 一括要約を開始", type="primary", key="batch_btn"):
-        if not episodes:
-            st.warning("処理対象のエピソードがありません。ポッドキャストURLを確認してください。")
-        else:
-            targets = episodes[:batch_count]
-            with st.status(f"最新 {len(targets)} 件のバッチ要約を実行中...", expanded=True) as status:
-                for idx, ep in enumerate(targets, start=1):
-                    ep_t = ep.get("title") or "Untitled"
-                    ep_u = ep.get("url") or ep.get("media_url") or ""
-                    ep_g = ep.get("uuid") or ep.get("id") or ""
-                    ep_pub = ep.get("published") or ""
-                    
-                    st.markdown(f"--- **[{idx}/{len(targets)}] {ep_t}** ---")
-                    if not ep_u:
-                        st.caption("音声 URL が取得できませんでした。スキップします。")
-                        continue
-
-                    if skip_already_processed and is_episode_processed(ep_g, ep_t, podcast_key, p_title, ep_pub):
-                        st.caption("処理済みのためスキップしました。")
-                        continue
-
-                    try:
-                        execute_episode_pipeline(
-                            ep_title=ep_t,
-                            ep_guid=ep_g,
-                            ep_media_url=ep_u,
-                            model_size=whisper_model,
-                            llm_prov=llm_provider,
-                            podcast_key=podcast_key,
-                            is_latest=(idx == 1),
-                            asr_engine="gemini" if "Gemini" in asr_engine else "whisper",
-                            gemini_key=gemini_key_input,
-                            gemini_model=gemini_asr_model,
-                            podcast_name=p_title,
-                            is_monologue=tab3_is_monologue,
-                            ep_published=ep_pub
-                        )
-                    except Exception as e:
-                        st.error(f"エラーが発生しました: {e}")
-                
-                status.update(label="🎉 バッチ処理が完了しました！", state="complete")
-                st.balloons()
-
-
-# ==========================================
-# タブ 4: 📄 テキストファイル要約
-# ==========================================
-with tab4:
     st.subheader("既存の文字起こしテキストから要約")
     uploaded_file = st.file_uploader("文字起こしテキストファイル (.txt) をアップロード", type=["txt"])
     text_direct = st.text_area("またはテキストを直接貼り付け", height=200)
@@ -1322,9 +1325,9 @@ with tab4:
 
 
 # ==========================================
-# タブ 5: 📚 要約アーカイブ閲覧
+# タブ 3: 📚 要約アーカイブ閲覧
 # ==========================================
-with tab5:
+with tab3:
     st.subheader("📚 保存済み要約・文字起こし・音声アーカイブ")
     all_files = [f for f in OUTPUT_DIR.rglob("*") if f.is_file()]
 
