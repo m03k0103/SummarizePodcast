@@ -88,36 +88,41 @@ def find_output_file(output_base: str, suffix: str, podcast_name: str | None = N
     指定エピソードのファイルを探索して Path を返却。
     1. 完全一致: {output_base}{suffix}
     2. タイトル後方一致: *_{output_base}{suffix} (プレフィックスの違いを吸収)
+    ※ .summary.* の場合は .md と .txt の相互フォールバック探索を透過的に実施
     """
-    filename = f"{output_base}{suffix}"
+    suffixes_to_try = [suffix]
+    if suffix.endswith(".md"):
+        suffixes_to_try.append(suffix[:-3] + ".txt")
+    elif suffix.endswith(".txt"):
+        suffixes_to_try.insert(0, suffix[:-4] + ".md")
 
-    # 探索先ディレクトリ（指定ポッドキャストフォルダ、および Output ルート）
-    dirs_to_check = []
-    if podcast_name:
-        dirs_to_check.append(get_podcast_output_dir(podcast_name))
-    dirs_to_check.append(OUTPUT_DIR)
+    for sfx in suffixes_to_try:
+        filename = f"{output_base}{sfx}"
+        dirs_to_check = []
+        if podcast_name:
+            dirs_to_check.append(get_podcast_output_dir(podcast_name))
+        dirs_to_check.append(OUTPUT_DIR)
 
-    # 1. 完全一致探索
-    for d in dirs_to_check:
-        p = d / filename
-        if p.exists() and p.is_file():
-            return p
+        # 1. 完全一致探索
+        for d in dirs_to_check:
+            p = d / filename
+            if p.exists() and p.is_file():
+                return p
 
-    # 2. 全サブフォルダ再帰探索（完全一致）
-    matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
-    if matched:
-        return matched[0]
+        # 2. 全サブフォルダ再帰探索（完全一致）
+        matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
+        if matched:
+            return matched[0]
 
-    # 3. プレフィックスの違いを吸収するタイトル後方一致探索
-    # 例: output_base が 'タイトル' の場合、'*_タイトル{suffix}' を探索
-    for d in dirs_to_check:
-        matched_wild = [f for f in d.glob(f"*_{filename}") if f.is_file()]
-        if matched_wild:
-            return matched_wild[0]
+        # 3. プレフィックスの違いを吸収するタイトル後方一致探索
+        for d in dirs_to_check:
+            matched_wild = [f for f in d.glob(f"*_{filename}") if f.is_file()]
+            if matched_wild:
+                return matched_wild[0]
 
-    matched_wild_all = [f for f in OUTPUT_DIR.rglob(f"*_{filename}") if f.is_file()]
-    if matched_wild_all:
-        return matched_wild_all[0]
+        matched_wild_all = [f for f in OUTPUT_DIR.rglob(f"*_{filename}") if f.is_file()]
+        if matched_wild_all:
+            return matched_wild_all[0]
 
     return None
 PODCAST_LIST_FILE = PROJECT_ROOT / "saved_podcasts.json"
@@ -350,19 +355,19 @@ def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", pod
     ymd = format_date_ymd(ep_published)
     if ymd:
         output_base_ymd = f"{ymd}_{safe_title}"
-        ja_file = find_output_file(output_base_ymd, ".summary.ja.txt", podcast_name)
+        ja_file = find_output_file(output_base_ymd, ".summary.ja.md", podcast_name)
         if ja_file and ja_file.exists():
             return True
 
     # 2. GUID 形式（旧形式）での探索
     if ep_guid:
         output_base_guid = f"{ep_guid}_{safe_title}"
-        ja_file = find_output_file(output_base_guid, ".summary.ja.txt", podcast_name)
+        ja_file = find_output_file(output_base_guid, ".summary.ja.md", podcast_name)
         if ja_file and ja_file.exists():
             return True
 
     # 3. プレフィックスなしでの探索
-    ja_file = find_output_file(safe_title, ".summary.ja.txt", podcast_name)
+    ja_file = find_output_file(safe_title, ".summary.ja.md", podcast_name)
     if ja_file and ja_file.exists():
         return True
 
@@ -706,8 +711,8 @@ def execute_episode_pipeline(
     target_dir = get_podcast_output_dir(podcast_name)
 
     txt_path = target_dir / f"{output_base}.txt"
-    ja_path = target_dir / f"{output_base}.summary.ja.txt"
-    en_path = target_dir / f"{output_base}.summary.en.txt"
+    ja_path = target_dir / f"{output_base}.summary.ja.md"
+    en_path = target_dir / f"{output_base}.summary.en.md"
     audio_path = target_dir / f"{output_base}.mp3"
 
     # 既存の音声ファイル探索（新YYYYMMDD優先、旧GUIDフォールバック）
@@ -1069,11 +1074,11 @@ with tab1:
             safe_title = sanitize_filename(ep_title)
             ymd = format_date_ymd(ep_published)
             output_base = f"{ymd}_{safe_title}" if ymd else f"{ep_guid}_{safe_title}"
-            ja_file = find_output_file(output_base, ".summary.ja.txt", p_title)
+            ja_file = find_output_file(output_base, ".summary.ja.md", p_title)
             if not ja_file and ep_guid:
                 output_base = f"{ep_guid}_{safe_title}"
-                ja_file = find_output_file(output_base, ".summary.ja.txt", p_title)
-            en_file = find_output_file(output_base, ".summary.en.txt", p_title)
+                ja_file = find_output_file(output_base, ".summary.ja.md", p_title)
+            en_file = find_output_file(output_base, ".summary.en.md", p_title)
             txt_file = find_output_file(output_base, ".txt", p_title)
             if ja_file and ja_file.exists():
                 result_data = {
@@ -1092,19 +1097,19 @@ with tab1:
             res_tab1, res_tab2, res_tab3, res_tab4 = st.tabs(["🇯🇵 日本語要約", "🇬🇧 英語要約", "📝 全文文字起こし", "🎧 音声 (MP3)"])
             with res_tab1:
                 st.download_button(
-                    "📥 日本語要約 (.txt) をダウンロード",
+                    "📥 日本語要約 (.md) をダウンロード",
                     data=result_data["ja"],
-                    file_name=f"{result_data['base_name']}.summary.ja.txt",
-                    mime="text/plain"
+                    file_name=f"{result_data['base_name']}.summary.ja.md",
+                    mime="text/markdown"
                 )
                 st.markdown(result_data["ja"])
 
             with res_tab2:
                 st.download_button(
-                    "📥 英語要約 (.txt) をダウンロード",
+                    "📥 英語要約 (.md) をダウンロード",
                     data=result_data["en"],
-                    file_name=f"{result_data['base_name']}.summary.en.txt",
-                    mime="text/plain"
+                    file_name=f"{result_data['base_name']}.summary.en.md",
+                    mime="text/markdown"
                 )
                 st.markdown(result_data["en"])
 
@@ -1303,8 +1308,8 @@ with tab4:
                 en_sum = generate_english_summary(target_text, "en", llm_provider=llm_provider)
 
                 text_summary_dir = get_podcast_output_dir("テキスト要約")
-                (text_summary_dir / f"{base_name}.summary.ja.txt").write_text(ja_sum, encoding="utf-8")
-                (text_summary_dir / f"{base_name}.summary.en.txt").write_text(en_sum, encoding="utf-8")
+                (text_summary_dir / f"{base_name}.summary.ja.md").write_text(ja_sum, encoding="utf-8")
+                (text_summary_dir / f"{base_name}.summary.en.md").write_text(en_sum, encoding="utf-8")
 
                 st.success("✅ 要約が生成されました！")
                 col_ja, col_en = st.columns(2)
@@ -1332,9 +1337,15 @@ with tab5:
             rel_dir = f.parent.relative_to(OUTPUT_DIR)
             category = str(rel_dir).replace("\\", "/") if str(rel_dir) != "." else "（未分類）"
 
-            if name.endswith(".summary.ja.txt"):
+            if name.endswith(".summary.ja.md"):
+                base = name[:-len(".summary.ja.md")]
+                grouped_records.setdefault((category, base), {})["ja"] = f
+            elif name.endswith(".summary.ja.txt"):
                 base = name[:-len(".summary.ja.txt")]
                 grouped_records.setdefault((category, base), {})["ja"] = f
+            elif name.endswith(".summary.en.md"):
+                base = name[:-len(".summary.en.md")]
+                grouped_records.setdefault((category, base), {})["en"] = f
             elif name.endswith(".summary.en.txt"):
                 base = name[:-len(".summary.en.txt")]
                 grouped_records.setdefault((category, base), {})["en"] = f
@@ -1382,7 +1393,7 @@ with tab5:
                 with arc_tab1:
                     if "ja" in rec:
                         ja_c = rec["ja"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 日本語要約をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/plain")
+                        st.download_button("📥 日本語要約 (.md) をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/markdown")
                         st.markdown(ja_c)
                     else:
                         st.caption("日本語要約ファイルがありません")
@@ -1390,7 +1401,7 @@ with tab5:
                 with arc_tab2:
                     if "en" in rec:
                         en_c = rec["en"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 英語要約をダウンロード", en_c, file_name=rec["en"].name, mime="text/plain")
+                        st.download_button("📥 英語要約 (.md) をダウンロード", en_c, file_name=rec["en"].name, mime="text/markdown")
                         st.markdown(en_c)
                     else:
                         st.caption("英語要約ファイルがありません")

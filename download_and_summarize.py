@@ -207,8 +207,8 @@ def main() -> int:
     en_summary = generate_english_summary(transcript_text, "en")
     ja_summary = generate_japanese_summary(transcript_text, "en")
 
-    en_path = target_dir / f"{output_base_name}.summary.en.txt"
-    ja_path = target_dir / f"{output_base_name}.summary.ja.txt"
+    en_path = target_dir / f"{output_base_name}.summary.en.md"
+    ja_path = target_dir / f"{output_base_name}.summary.ja.md"
 
     en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
     ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")

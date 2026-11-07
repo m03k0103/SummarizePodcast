@@ -874,7 +874,7 @@ def main() -> int:
         )
         if not english_summary:
             english_summary = "(Transcription is empty; summary could not be created.)"
-        english_summary_path = output_dir / f"{output_base}.summary.en.txt"
+        english_summary_path = output_dir / f"{output_base}.summary.en.md"
         if not args.source_language.lower().startswith("en") and not is_mostly_english(english_summary):
             note = "(English translation unavailable; original summary in source language follows)\n\n"
             english_summary_path.write_text(note + english_summary, encoding="utf-8")
@@ -887,7 +887,7 @@ def main() -> int:
         )
         if not japanese_summary:
             japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
-        japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
+        japanese_summary_path = output_dir / f"{output_base}.summary.ja.md"
         japanese_summary_path.write_text(japanese_summary, encoding="utf-8")
         print(f"Saved Japanese summary to: {japanese_summary_path}")
         return 0
@@ -961,7 +961,7 @@ def main() -> int:
         )
         if not english_summary:
             english_summary = "(Transcription is empty; summary could not be created.)"
-        english_summary_path = output_dir / f"{output_base}.summary.en.txt"
+        english_summary_path = output_dir / f"{output_base}.summary.en.md"
         english_summary_path.write_text(english_summary, encoding="utf-8")
         print(f"Saved English summary to: {english_summary_path}")
 
@@ -970,7 +970,7 @@ def main() -> int:
         )
         if not japanese_summary:
             japanese_summary = "(文字起こしが空です。概要を作成できませんでした。)"
-        japanese_summary_path = output_dir / f"{output_base}.summary.ja.txt"
+        japanese_summary_path = output_dir / f"{output_base}.summary.ja.md"
         japanese_summary_path.write_text(japanese_summary, encoding="utf-8")
         print(f"Saved Japanese summary to: {japanese_summary_path}")
 

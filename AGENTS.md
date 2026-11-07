@@ -25,10 +25,10 @@
 
 4. **出力ファイルおよび要約フォーマット規約**
    - 1エピソードにつき、以下のファイルセットを `Output/` 配下に生成・保存すること：
-     - `{GUID}_{タイトル}.mp3`: 音声バイナリ
-     - `{GUID}_{タイトル}.txt`: 全文文字起こしテキスト（話者ラベル・タイムスタンプ付き）
-     - `{GUID}_{タイトル}.summary.ja.txt`: 日本語要約（概要・主要ポイント・結論）
-     - `{GUID}_{タイトル}.summary.en.txt`: 英語要約（Overview・Key Takeaways・Conclusion）
+     - `{YYYYMMDD}_{タイトル}.mp3`: 音声バイナリ
+     - `{YYYYMMDD}_{タイトル}.txt`: 全文文字起こしテキスト（話者ラベル・タイムスタンプ付き）
+     - `{YYYYMMDD}_{タイトル}.summary.ja.md`: 日本語要約（概要・主要ポイント・結論）
+     - `{YYYYMMDD}_{タイトル}.summary.en.md`: 英語要約（Overview・Key Takeaways・Conclusion）
 
 ---
 
