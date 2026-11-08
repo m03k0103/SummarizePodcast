@@ -259,6 +259,8 @@ def load_saved_podcasts() -> list[dict]:
         for p in podcasts:
             if "default_is_monologue" not in p:
                 p["default_is_monologue"] = False
+            if "language" not in p:
+                p["language"] = "ja" if re.search(r"[぀-ゟ゠-ヿ一-鿿]", p.get("name", "")) else "en"
     return podcasts
 
 
@@ -687,6 +689,22 @@ def transcribe_audio_with_gemini(
 
 
 
+def is_japanese_podcast(podcast_name: str = "", feed_language: str = "", text_sample: str = "", saved_lang: str | None = None) -> bool:
+    """
+    番組が日本語ポッドキャストかどうかを判定。
+    1. saved_podcasts に設定がある場合はそれを最優先 ("ja" / "en")
+    2. フィード言語コード（ja, ja-JP 等）の判定
+    3. 番組名やテキストサンプルの日本語文字（ひらがな・カタカナ・漢字）の含有判定
+    """
+    if saved_lang:
+        return saved_lang.lower().startswith("ja")
+    if feed_language and feed_language.lower().startswith("ja"):
+        return True
+    combined = f"{podcast_name} {text_sample}"
+    ja_chars = len(re.findall(r"[぀-ゟ゠-ヿ一-鿿]", combined))
+    return ja_chars >= 5
+
+
 def download_episode_audio(
     ep_title: str,
     ep_media_url: str,
@@ -738,7 +756,8 @@ def execute_episode_pipeline(
     gemini_model: str = "gemini-3.6-flash",
     podcast_name: str = "",
     is_monologue: bool = False,
-    ep_published: str = ""
+    ep_published: str = "",
+    podcast_language: str = "ja"
 ):
     """1エピソードをダウンロード -> 文字起こし(Whisper or Gemini) -> 要約 -> 保存 -> GUID更新"""
     safe_title = sanitize_filename(ep_title)
@@ -800,14 +819,22 @@ def execute_episode_pipeline(
     txt_path.write_text(transcript_text, encoding="utf-8")
     st.write(f"✅ 文字起こし完了: `{txt_path.name}` ({len(transcript_text):,} 文字)")
 
-    # LLM 要約
-    st.write(f"🧠 **ステップ 3/3: LLM ({llm_prov}) で日英要約を生成中...**")
-    ja_sum = generate_japanese_summary(transcript_text, "en", llm_provider=llm_prov)
-    en_sum = generate_english_summary(transcript_text, "en", llm_provider=llm_prov)
+    # LLM 要約（日本語ポッドキャストでは英語サマリ作成をスキップ）
+    is_ja = is_japanese_podcast(podcast_name=podcast_name, text_sample=transcript_text[:300], saved_lang=podcast_language)
 
-    ja_path.write_text(ja_sum or "(要約生成失敗)", encoding="utf-8")
-    en_path.write_text(en_sum or "(要約生成失敗)", encoding="utf-8")
-    st.write("✅ 日本語・英語の要約保存完了")
+    if is_ja:
+        st.write(f"🧠 **ステップ 3/3: LLM ({llm_prov}) で日本語要約を生成中... (※日本語番組のため英語サマリ作成はスキップ)**")
+        ja_sum = generate_japanese_summary(transcript_text, "ja", llm_provider=llm_prov)
+        en_sum = ""
+        ja_path.write_text(ja_sum or "(要約生成失敗)", encoding="utf-8")
+        st.write("✅ 日本語要約保存完了（英語サマリはスキップ）")
+    else:
+        st.write(f"🧠 **ステップ 3/3: LLM ({llm_prov}) で日英要約を生成中...**")
+        ja_sum = generate_japanese_summary(transcript_text, "en", llm_provider=llm_prov)
+        en_sum = generate_english_summary(transcript_text, "en", llm_provider=llm_prov)
+        ja_path.write_text(ja_sum or "(要約生成失敗)", encoding="utf-8")
+        en_path.write_text(en_sum or "(要約生成失敗)", encoding="utf-8")
+        st.write("✅ 日本語・英語の要約保存完了")
 
     # GUID を更新
     if ep_guid:
@@ -931,25 +958,47 @@ with col_del:
 
 active_entry = next((p for p in saved_podcasts if p["name"] == selected_option), None)
 current_podcast_is_monologue = active_entry.get("default_is_monologue", False) if active_entry else False
+current_podcast_language = active_entry.get("language", "ja") if active_entry else "ja"
 
 with col_custom:
     if selected_option == "✏️ URLを直接指定":
         active_url = st.text_input("Pocket Casts 番組 URL または UUID (入力すると自動保存されます)", placeholder="https://pocketcasts.com/podcast/...")
     else:
         active_url = active_entry["url"] if active_entry else ""
-        selected_default_mode = st.radio(
-            "⚙️ 番組の標準構成（デフォルト）",
-            ["👥 複数人（対談）", "🎙️ 単独（一人語り）"],
-            index=1 if current_podcast_is_monologue else 0,
-            horizontal=True,
-            key=f"default_speaker_mode_{selected_option}",
-            help="この番組のエピソード要約時に初期選択される構成です。エピソード実行時に個別に切り替えることも可能です。"
-        )
+        c_mode, c_lang = st.columns([1, 1])
+        with c_mode:
+            selected_default_mode = st.radio(
+                "⚙️ 標準構成",
+                ["👥 対談", "🎙️ 単独"],
+                index=1 if current_podcast_is_monologue else 0,
+                horizontal=True,
+                key=f"default_speaker_mode_{selected_option}",
+                help="この番組のエピソード要約時に初期選択される構成です。"
+            )
+        with c_lang:
+            selected_lang_label = st.radio(
+                "🌐 番組言語",
+                ["🇯🇵 日本語", "🇺🇸 英語"],
+                index=0 if current_podcast_language == "ja" else 1,
+                horizontal=True,
+                key=f"podcast_language_{selected_option}",
+                help="日本語番組では英語サマリ作成を省略し、API消費を50%削減します。"
+            )
+
         new_default_mono = selected_default_mode.startswith("🎙️")
+        new_lang = "ja" if selected_lang_label.startswith("🇯🇵") else "en"
+
+        changed = False
         if active_entry and new_default_mono != current_podcast_is_monologue:
             active_entry["default_is_monologue"] = new_default_mono
+            changed = True
+        if active_entry and new_lang != current_podcast_language:
+            active_entry["language"] = new_lang
+            changed = True
+
+        if changed:
             save_saved_podcasts(saved_podcasts)
-            st.toast(f"💾 「{selected_option}」の標準構成を【{'単独（一人語り）' if new_default_mono else '複数人（対談）'}】に更新しました", icon="✅")
+            st.toast(f"💾 「{selected_option}」の設定を更新しました", icon="✅")
             st.rerun()
 
 # ポッドキャストデータ取得
@@ -1219,7 +1268,8 @@ with tab1:
                             gemini_model=gemini_asr_model,
                             podcast_name=p_title,
                             is_monologue=tab1_is_monologue,
-                            ep_published=t_published
+                            ep_published=t_published,
+                            podcast_language=current_podcast_language
                         )
                         success_count += 1
                         safe_title = sanitize_filename(t_title)
@@ -1259,13 +1309,16 @@ with tab1:
                 st.markdown(result_data["ja"])
 
             with res_tab2:
-                st.download_button(
-                    "📥 英語要約 (.md) をダウンロード",
-                    data=result_data["en"],
-                    file_name=f"{result_data['base_name']}.summary.en.md",
-                    mime="text/markdown"
-                )
-                st.markdown(result_data["en"])
+                if result_data.get("en"):
+                    st.download_button(
+                        "📥 英語要約 (.md) をダウンロード",
+                        data=result_data["en"],
+                        file_name=f"{result_data['base_name']}.summary.en.md",
+                        mime="text/markdown"
+                    )
+                    st.markdown(result_data["en"])
+                else:
+                    st.info("💡 日本語ポッドキャストのため、英語サマリの作成はスキップされました（日本語要約のみ生成）。")
 
             with res_tab3:
                 st.download_button(

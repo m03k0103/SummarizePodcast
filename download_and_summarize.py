@@ -202,19 +202,26 @@ def main() -> int:
     transcript_path.write_text(transcript_text, encoding="utf-8")
     print(f"文字起こしテキスト保存完了: {transcript_path}")
 
-    # LLM 要約
-    print("LLM要約生成中 (Gemini / OpenAI / Ollama)...")
-    en_summary = generate_english_summary(transcript_text, "en")
-    ja_summary = generate_japanese_summary(transcript_text, "en")
+    # LLM 要約（日本語ポッドキャストでは英語サマリ作成をスキップ）
+    ja_chars = len(re.findall(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]", f"{podcast_title} {transcript_text[:300]}"))
+    is_ja = ja_chars >= 5
 
-    en_path = target_dir / f"{output_base_name}.summary.en.md"
     ja_path = target_dir / f"{output_base_name}.summary.ja.md"
+    en_path = target_dir / f"{output_base_name}.summary.en.md"
 
-    en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
-    ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
-
-    print(f"Saved English summary to: {en_path}")
-    print(f"Saved Japanese summary to: {ja_path}")
+    if is_ja:
+        print("LLM日本語要約生成中 (※日本語ポッドキャストのため英語サマリ作成はスキップ)...")
+        ja_summary = generate_japanese_summary(transcript_text, "ja")
+        ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
+        print(f"Saved Japanese summary to: {ja_path}")
+    else:
+        print("LLM要約生成中 (Gemini / OpenAI / Ollama)...")
+        en_summary = generate_english_summary(transcript_text, "en")
+        ja_summary = generate_japanese_summary(transcript_text, "en")
+        en_path.write_text(en_summary or "(要約生成失敗)", encoding="utf-8")
+        ja_path.write_text(ja_summary or "(要約生成失敗)", encoding="utf-8")
+        print(f"Saved English summary to: {en_path}")
+        print(f"Saved Japanese summary to: {ja_path}")
 
     # 一時ファイル削除後に GUID を保存
     if ep_guid:
