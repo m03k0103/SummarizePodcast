@@ -1,5 +1,6 @@
 import datetime
 import gzip
+import html
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from download_and_summarize_podcast import (
     fetch_episodes_from_podcast_url,
     extract_download_url,
     fetch_text,
+    normalize_text,
 )
 from audio_chunker import (
     get_audio_duration,
@@ -138,58 +140,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# スタイル
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #10B981 0%, #3B82F6 50%, #8B5CF6 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 0.95rem;
-        color: #6B7280;
-        margin-bottom: 1.5rem;
-    }
-    .podcast-card {
-        border-radius: 12px;
-        padding: 1.25rem 1.5rem;
-        margin-bottom: 1.25rem;
-        border: 1px solid #E5E7EB;
-        background-color: #F9FAFB;
-    }
-    @media (prefers-color-scheme: dark) {
-        .podcast-card {
-            border: 1px solid #374151;
-            background-color: #1F2937;
-        }
-        .sub-header {
-            color: #9CA3AF;
-        }
-    }
-    .badge-new {
-        background-color: #EF4444;
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.85rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .badge-done {
-        background-color: #10B981;
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.85rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-</style>
-""", unsafe_allow_html=True)
+# スタイル読み込み (Design.md §1.1 / BAN-09 準拠: 外部 CSS 一本化)
+def load_css(css_path: Path) -> None:
+    if css_path.exists():
+        css_content = css_path.read_text(encoding="utf-8")
+        st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
+
+
+load_css(PROJECT_ROOT / "styles.css")
 
 
 # --- ユーティリティ・管理関数 ---
@@ -336,7 +294,14 @@ def fetch_feed_data(url_or_uuid: str) -> tuple[dict, list[dict]]:
 
         data = json.loads(data_str)
         podcast_info = data.get("podcast", {})
+        if isinstance(podcast_info, dict):
+            for key in ("title", "author", "description"):
+                if podcast_info.get(key):
+                    podcast_info[key] = normalize_text(str(podcast_info[key]), single_line=(key != "description"))
         episodes = podcast_info.get("episodes", [])
+        for ep in episodes:
+            if isinstance(ep, dict) and ep.get("title"):
+                ep["title"] = normalize_text(str(ep["title"]), single_line=True)
         return podcast_info, episodes
 
     # UUID が見つからない場合は汎用パーサー
@@ -847,7 +812,7 @@ def execute_episode_pipeline(
 
 
 # --- サイドバー設定 ---
-st.sidebar.title("⚙️ 設定 & 環境")
+st.sidebar.title("⚙️ 設定")
 
 st.sidebar.subheader("🤖 AI 要約設定")
 llm_provider = st.sidebar.selectbox(
@@ -885,7 +850,7 @@ asr_engine = st.sidebar.selectbox(
         "Whisper (ローカルモデル)"
     ],
     index=0,
-    help="Gemini: 音声を直接Geminiに渡して話者分離付きで高速文字起こし / Whisper: PC上でローカル実行"
+    help="Gemini: 音声を直接Geminiに渡して話者分離付きで文字起こし / Whisper: PC上でローカル実行"
 )
 
 whisper_model = "base"
@@ -895,19 +860,19 @@ if asr_engine.startswith("Whisper"):
         "Whisper モデルサイズ",
         ["tiny", "base", "small", "medium", "large"],
         index=0,
-        help="tiny: 最速・省メモリ / base: 標準 / small・medium: 高精度"
+        help="tiny: 軽量 / base: 標準 / small, medium, large: 拡張モデル"
     )
 else:
     model_choice = st.sidebar.selectbox(
         "Gemini モデル",
         [
-            "gemini-3.6-flash (推奨・高精度・安定)",
-            "gemini-3.1-flash-lite (高速・軽量・安定)",
+            "gemini-3.6-flash (標準推奨)",
+            "gemini-3.1-flash-lite (軽量モデル)",
             "gemini-3.5-flash",
-            "gemini-3.8-flash (⚠️混雑のため503失敗多め)"
+            "gemini-3.8-flash (非推奨: 503エラー発生傾向)"
         ],
         index=0,
-        help="音声認識＆話者分離に使用するGeminiモデル (3.6-flash推奨。3.8-flashはGoogle側混雑のため現在503エラーが多発します)"
+        help="音声認識および話者分離に使用するGeminiモデル (3.6-flash推奨。3.8-flashは503エラーが多発します)"
     )
     gemini_asr_model = model_choice.split()[0]
     if not gemini_key_input:
@@ -927,7 +892,7 @@ else:
 
 # --- メインエリア ---
 st.markdown('<div class="main-header">🎙️ Podcast AI Summarizer</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">任意のポッドキャストを自動監視 ➔ ダウンロード ➔ Whisper 文字起こし ➔ AI 日英要約</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">ポッドキャストの監視 ➔ 音声取得 ➔ 文字起こし ➔ AI 要約</div>', unsafe_allow_html=True)
 
 # ポッドキャスト選択・入力バー
 saved_podcasts = load_saved_podcasts()
@@ -1034,33 +999,33 @@ if selected_option == "✏️ URLを直接指定" and active_url.strip() and epi
 
 # 番組メタデータの表示
 if podcast_info and episodes:
-    p_title = podcast_info.get("title") or selected_option
-    p_author = podcast_info.get("author") or "不明"
-    p_desc = podcast_info.get("description") or ""
-    
+    p_title = normalize_text(podcast_info.get("title") or selected_option, single_line=True)
+    p_author = normalize_text(podcast_info.get("author") or "不明", single_line=True)
+    p_desc = normalize_text(podcast_info.get("description") or "", single_line=True)
+    p_desc_short = p_desc[:220] + ("..." if len(p_desc) > 220 else "")
+
     st.markdown(f"""
 <div class="podcast-card">
-    <div style="font-size: 1.25rem; font-weight: bold; margin-bottom: 0.3rem;">{p_title}</div>
-    <div style="font-size: 0.88rem; color: #6B7280; margin-bottom: 0.5rem;">👤 <b>配信者:</b> {p_author} &nbsp;&nbsp;|&nbsp;&nbsp; 📦 <b>取得エピソード数:</b> {len(episodes)} 件</div>
-    <div style="font-size: 0.85rem; color: #4B5563;">{p_desc[:250] + ('...' if len(p_desc) > 250 else '')}</div>
+    <div class="podcast-card-title">{html.escape(p_title)}</div>
+    <div class="podcast-card-meta">👤 <b>配信者:</b> {html.escape(p_author)} &nbsp;&nbsp;|&nbsp;&nbsp; 📦 <b>エピソード数:</b> {len(episodes)} 件</div>
+    <div class="podcast-card-desc">{html.escape(p_desc_short)}</div>
 </div>
 """, unsafe_allow_html=True)
 
 
 # タブ構成 (エピソード一覧・テキスト要約・アーカイブの3大構成)
 tab1, tab2, tab3 = st.tabs([
-    "📋 エピソード一覧 & 要約処理",
-    "📄 テキストファイル要約",
-    "📚 要約アーカイブ閲覧"
+    "📋 エピソード一覧",
+    "📄 テキスト要約",
+    "📚 アーカイブ閲覧"
 ])
 
 
 # ==========================================
-# タブ 1: 📋 エピソード一覧 & 要約処理 (統合タブ)
+# タブ 1: 📋 エピソード一覧 (統合タブ)
 # ==========================================
 with tab1:
-    st.subheader("📋 エピソード一覧 & 処理ステータス")
-    st.caption("ポッドキャストの全エピソードの音声・要約の処理状況を確認し、チェックボックスで選択して「音声ダウンロードのみ」または「要約実行」を行えます。")
+    st.subheader("📋 エピソード一覧")
 
     col_btn, col_blank = st.columns([1, 4])
     with col_btn:
@@ -1140,6 +1105,19 @@ with tab1:
         # セッションの選択状態を DataFrame に適用
         df_episodes["選択"] = st.session_state[select_state_key]
 
+        # 高密度1行ステータスバー (Design.md §1.4-2)
+        total_eps = len(table_rows)
+        audio_done_cnt = sum(1 for r in table_rows if r["_has_audio"])
+        summary_done_cnt = sum(1 for r in table_rows if r["_has_summary"])
+        st.markdown(
+            f'<div class="status-strip">'
+            f'<span class="status-strip-item"><span class="status-strip-label">全エピソード:</span> <span class="status-strip-value">{total_eps} 件</span></span>'
+            f'<span class="status-strip-item"><span class="status-strip-label">音声DL済:</span> <span class="status-strip-value">{audio_done_cnt} 件</span></span>'
+            f'<span class="status-strip-item"><span class="status-strip-label">要約済:</span> <span class="status-strip-value">{summary_done_cnt} 件</span></span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
         # エピソード一覧表 (st.data_editor)
         edited_df = st.data_editor(
             df_episodes[["選択", "No", "公開日", "タイトル", "再生時間", "音声データ", "要約データ", "_idx"]],
@@ -1171,11 +1149,11 @@ with tab1:
         with col_cfg1:
             tab1_dialogue_mode = st.radio(
                 "出演者構成（話者分離設定）",
-                ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+                ["👥 複数人対談（話者分離あり）", "🎙️ 単独出演（話者分離なし）"],
                 index=1 if current_podcast_is_monologue else 0,
                 horizontal=True,
                 key=f"tab1_dialogue_mode_{podcast_key}",
-                help="選択したエピソード群の出演者構成を指定します（デフォルト: この番組の標準設定）。個別の対談回・一人語り回に合わせて変更可能です。"
+                help="選択したエピソード群の出演者構成を指定します（初期値: この番組の標準設定）。個別回に合わせて変更可能です。"
             )
             tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
 
@@ -1296,7 +1274,7 @@ with tab1:
         result_data = st.session_state.get("last_result")
         if result_data:
             st.markdown("---")
-            st.subheader(f"📄 最新の要約・文字起こし結果: {result_data['title']}")
+            st.subheader(f"📄 処理結果: {normalize_text(result_data['title'], single_line=True)}")
 
             res_tab1, res_tab2, res_tab3, res_tab4 = st.tabs(["🇯🇵 日本語要約", "🇬🇧 英語要約", "📝 全文文字起こし", "🎧 音声 (MP3)"])
             with res_tab1:
@@ -1381,7 +1359,7 @@ with tab2:
 # タブ 3: 📚 要約アーカイブ閲覧
 # ==========================================
 with tab3:
-    st.subheader("📚 保存済み要約・文字起こし・音声アーカイブ")
+    st.subheader("📚 保存済みアーカイブ")
     all_files = [f for f in OUTPUT_DIR.rglob("*") if f.is_file()]
 
     if not all_files:

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote_plus, urlparse
@@ -15,6 +16,22 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+
+
+def normalize_text(text: str, single_line: bool = False) -> str:
+    """NFKC正規化（康煕部首・互換漢字の標準化）および不可分空白(\xa0)等のクレンジング"""
+    if not text:
+        return ""
+    normalized = unicodedata.normalize("NFKC", text)
+    normalized = normalized.replace("\xa0", " ").replace("\u200b", "")
+    if single_line:
+        return re.sub(r"\s+", " ", normalized).strip()
+    lines = [
+        re.sub(r"[ \t\u3000]+", " ", line).strip()
+        for line in normalized.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ]
+    result = "\n".join(lines).strip()
+    return re.sub(r"\n{3,}", "\n\n", result)
 
 
 def fetch_text(url: str) -> str:
@@ -541,7 +558,7 @@ def generate_english_summary(
         ollama_base_url=ollama_base_url,
     )
     if llm_res and llm_res.strip():
-        return llm_res.strip()
+        return normalize_text(llm_res)
 
     cleaned_text = remove_boilerplate(text)
     if not cleaned_text.strip():
@@ -553,7 +570,7 @@ def generate_english_summary(
         summary = summarize_text(cleaned_text, max_sentences=max_sentences, ratio=ratio)
         if not summary.strip():
             summary = summarize_text(cleaned_text, max_sentences=max_sentences, ratio=0.5)
-        return summary
+        return normalize_text(summary)
 
     # Try to translate full text to English first.
     english_text = translate_text(cleaned_text, source_language=source_language, target_language="en")
@@ -561,7 +578,7 @@ def generate_english_summary(
         summary = summarize_text(english_text, max_sentences=max_sentences, ratio=ratio)
         if not summary.strip():
             summary = summarize_text(english_text, max_sentences=max_sentences, ratio=0.5)
-        return summary
+        return normalize_text(summary)
 
     # Full-text translation failed: summarize in source language, then translate the shorter summary.
     source_summary = summarize_text(cleaned_text, max_sentences=max_sentences, ratio=ratio)
@@ -572,9 +589,9 @@ def generate_english_summary(
     if not translated_summary.strip():
         translated_summary = translate_text_in_chunks(source_summary, source_language=source_language, target_language="en")
     if translated_summary.strip():
-        return translated_summary
+        return normalize_text(translated_summary)
 
-    return source_summary
+    return normalize_text(source_summary)
 
 
 def generate_japanese_summary(
@@ -604,7 +621,7 @@ def generate_japanese_summary(
         ollama_base_url=ollama_base_url,
     )
     if llm_res and llm_res.strip():
-        return llm_res.strip()
+        return normalize_text(llm_res)
 
     cleaned_text = remove_boilerplate(text)
     if not cleaned_text.strip():
@@ -616,7 +633,7 @@ def generate_japanese_summary(
         summary = summarize_text(japanese_text, max_sentences=max_sentences, ratio=ratio)
         if not summary.strip():
             summary = summarize_text(japanese_text, max_sentences=max_sentences, ratio=0.5)
-        return summary
+        return normalize_text(summary)
 
     english_summary = generate_english_summary(text, language, max_sentences=max_sentences, ratio=ratio, llm_provider="textrank")
     if english_summary.strip():
@@ -624,13 +641,13 @@ def generate_japanese_summary(
         if not translated_summary.strip():
             translated_summary = translate_text_in_chunks(english_summary, source_language="en", target_language="ja")
         if translated_summary.strip():
-            return translated_summary
+            return normalize_text(translated_summary)
 
     japanese_text = translate_text(cleaned_text, source_language=source_language, target_language="ja")
     summary = summarize_text(japanese_text, max_sentences=max_sentences, ratio=ratio)
     if not summary.strip():
         summary = summarize_text(japanese_text, max_sentences=max_sentences, ratio=0.5)
-    return summary
+    return normalize_text(summary)
 
 
 STOPWORDS = {
@@ -802,7 +819,7 @@ def fetch_episodes_from_podcast_url(url: str, count: int = 10) -> list[dict]:
             results = []
             for ep in raw_episodes[:count]:
                 results.append({
-                    "title": ep.get("title") or "Untitled Episode",
+                    "title": normalize_text(ep.get("title") or "Untitled Episode", single_line=True),
                     "media_url": ep.get("url") or "",
                     "uuid": ep.get("uuid") or ep.get("id") or "",
                     "published": ep.get("published") or "",
@@ -816,7 +833,7 @@ def fetch_episodes_from_podcast_url(url: str, count: int = 10) -> list[dict]:
     download_url = extract_download_url(page_html)
     if download_url:
         return [{
-            "title": choose_output_name(url, download_url, None),
+            "title": normalize_text(choose_output_name(url, download_url, None), single_line=True),
             "media_url": download_url,
             "uuid": "",
             "published": "",
