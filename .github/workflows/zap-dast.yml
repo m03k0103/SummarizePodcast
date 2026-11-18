@@ -1,0 +1,187 @@
+name: OWASP ZAP DAST Scan
+
+on:
+  pull_request:
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+  schedule:
+    # Weekly Sunday 04:00 JST (19:00 UTC Saturday)
+    - cron: '0 19 * * 6'
+  workflow_dispatch:
+    inputs:
+      scan_type:
+        description: "ZAP scan type"
+        required: true
+        default: baseline
+        type: choice
+        options:
+          - baseline
+          - full
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zap-dast:
+    name: ZAP DAST (SummarizePodcast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TARGET_URL: "http://127.0.0.1:8005/"
+      HEALTH_URL: "http://127.0.0.1:8005/_stcore/health"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and build application
+        run: python3 -m pip install --upgrade pip && pip install streamlit pandas
+
+      - name: Validate target URL (local-only safety guard)
+        run: python3 .zap/evaluate_zap_report.py --validate-target "${{ env.TARGET_URL }}"
+
+      - name: Start local server and wait for readiness
+        run: |
+          mkdir -p .zap/reports
+          nohup streamlit run app.py --server.port 8005 --server.address 127.0.0.1 --server.headless true --browser.gatherUsageStats false > .zap/server.log 2>&1 &
+          SERVER_PID=$!
+          echo "${SERVER_PID}" > .zap/server.pid
+          for i in $(seq 1 30); do
+            if curl -fsS "${{ env.HEALTH_URL }}" >/dev/null 2>&1; then
+              echo "[OK] Local server is ready at ${{ env.HEALTH_URL }} (PID=${SERVER_PID})"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "[ERROR] Local server failed to respond within 30s."
+          cat .zap/server.log || true
+          exit 1
+
+      - name: Determine ZAP scan mode
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event.inputs.scan_type }}" = "full" ]; then
+            echo "ZAP_SCRIPT=zap-full-scan.py" >> "$GITHUB_ENV"
+            echo "SCAN_MODE=full" >> "$GITHUB_ENV"
+          else
+            echo "ZAP_SCRIPT=zap-baseline.py" >> "$GITHUB_ENV"
+            echo "SCAN_MODE=baseline" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run OWASP ZAP (${{ env.ZAP_SCRIPT }})
+        run: |
+          mkdir -p .zap/reports
+          chmod 777 .zap/reports
+          cp .zap/rules.tsv .zap/reports/rules.tsv
+          set +e
+          docker run --rm --network host \
+            -v "${{ github.workspace }}/.zap/reports:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            "${{ env.ZAP_SCRIPT }}" \
+            -t "${{ env.TARGET_URL }}" \
+            -c rules.tsv \
+            -J report_json.json \
+            -w report_md.md \
+            -r report_html.html \
+            -I
+          ZAP_EXIT=$?
+          set -e
+          rm -f .zap/reports/rules.tsv
+          echo "ZAP docker exit code: ${ZAP_EXIT}"
+          if [ ! -f .zap/reports/report_json.json ]; then
+            echo "::error::ZAP did not produce .zap/reports/report_json.json (exit=${ZAP_EXIT})"
+            exit 1
+          fi
+
+      - name: Evaluate ZAP report and generate Job Summary
+        id: evaluate
+        if: always()
+        run: |
+          set +e
+          python3 .zap/evaluate_zap_report.py \
+            --report .zap/reports/report_json.json \
+            --summary-out .zap/reports/summary.md \
+            --rules .zap/rules.tsv \
+            --target-url "${{ env.TARGET_URL }}" \
+            --scan-type "${{ env.SCAN_MODE }}" \
+            --project-name "SummarizePodcast"
+          GATE_EXIT=$?
+          set -e
+          echo "gate_exit=${GATE_EXIT}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ZAP scan reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-scan-report
+          path: .zap/reports/
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Post or update PR summary comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = '.zap/reports/summary.md';
+            if (!fs.existsSync(summaryPath)) {
+              core.info('No ZAP summary markdown found; skipping PR comment.');
+              return;
+            }
+            const body = fs.readFileSync(summaryPath, 'utf8');
+            const marker = '<!-- zap-dast-summary-comment -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner,
+                repo,
+                issue_number,
+                per_page: 100,
+              });
+              const existing = comments.find((c) => c.body && c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner,
+                  repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number,
+                  body,
+                });
+              }
+            } catch (err) {
+              core.warning(`Could not post PR comment: ${err.message}`);
+            }
+
+      - name: Stop local server
+        if: always()
+        run: |
+          if [ -f .zap/server.pid ]; then
+            kill "$(cat .zap/server.pid)" 2>/dev/null || true
+          fi
+
+      - name: Enforce High-risk security gate
+        if: always()
+        run: |
+          if [ "${{ steps.evaluate.outputs.gate_exit }}" != "0" ]; then
+            echo "::error::OWASP ZAP detected High-risk vulnerability alerts. See zap-scan-report artifact and Job Summary."
+            exit 1
+          fi
