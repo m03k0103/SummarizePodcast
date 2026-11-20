@@ -338,7 +338,7 @@ def remove_boilerplate(text: str) -> str:
     return content.strip()
 
 
-def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-3.6-flash") -> str:
+def call_gemini_api(prompt: str, api_key: str, model: str = "gemini-3.8-flash") -> str:
     import time
     import urllib.error
     model_path = model if model.startswith("models/") else f"models/{model}"
@@ -493,13 +493,13 @@ def summarize_with_llm(
         if not gemini_key:
             print("Gemini API key is required. Set GEMINI_API_KEY env var or pass --gemini-api-key.", file=sys.stderr)
             return None
-        target_model = model or "gemini-3.6-flash"
+        target_model = model or "gemini-3.8-flash"
         print(f"Summarizing using Gemini API ({target_model})...")
         res = call_gemini_api(prompt, gemini_key, model=target_model)
         if res:
             return res
         import time
-        for fallback_model in ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]:
+        for fallback_model in ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]:
             if fallback_model == target_model:
                 continue
             time.sleep(1)

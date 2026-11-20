@@ -348,12 +348,43 @@ def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", pod
     return False
 
 
+GEMINI_ASR_FALLBACK_ORDER = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-transcribe",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+]
+TRANSCRIBE_MAX_DURATION_SEC = 50 * 60  # 50分未満限定 (98,304トークン上限対策)
+
+
+def build_asr_candidate_models(selected_model: str, duration_sec: float | None = None) -> list[str]:
+    """音声尺(50分未満制限)と優先順位に基づきASR候補モデルリストを構築"""
+    clean_model = (selected_model or "gemini-3.8-flash").strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[len("models/"):]
+
+    allow_transcribe = duration_sec is not None and 0 < duration_sec < TRANSCRIBE_MAX_DURATION_SEC
+    candidates: list[str] = []
+
+    if clean_model != "gemini-3.5-transcribe" or allow_transcribe:
+        candidates.append(clean_model)
+
+    for fallback in GEMINI_ASR_FALLBACK_ORDER:
+        if fallback == "gemini-3.5-transcribe" and not allow_transcribe:
+            continue
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
 def _transcribe_single_audio_file_with_gemini(
     audio_path: Path,
     api_key: str,
     model_name: str,
     prompt: str,
-    caption_prefix: str = ""
+    caption_prefix: str = "",
+    duration_sec: float | None = None,
 ) -> str:
     """単一の音声ファイルを Gemini File API 経由でアップロードし文字起こしを実行"""
     import json
@@ -430,14 +461,7 @@ def _transcribe_single_audio_file_with_gemini(
             raise ValueError("Gemini サーバー側での音声ファイル処理に失敗しました。")
 
         # 4. generateContent による文字起こし＆話者分離 (フォールバック機構付き)
-        clean_model = model_name
-        if clean_model.startswith("models/"):
-            clean_model = clean_model[len("models/"):]
-
-        candidate_models = [clean_model]
-        for fallback in ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"]:
-            if fallback not in candidate_models:
-                candidate_models.append(fallback)
+        candidate_models = build_asr_candidate_models(model_name, duration_sec=duration_sec)
 
         req_body = {
             "contents": [
@@ -543,7 +567,7 @@ def _transcribe_single_audio_file_with_gemini(
 def transcribe_audio_with_gemini(
     audio_path: Path,
     api_key: str,
-    model_name: str = "gemini-3.6-flash",
+    model_name: str = "gemini-3.8-flash",
     podcast_title: str = "",
     chunk_minutes: int | None = None,
     is_monologue: bool = False
@@ -576,7 +600,8 @@ def transcribe_audio_with_gemini(
             audio_path=audio_path,
             api_key=api_key,
             model_name=model_name,
-            prompt=prompt
+            prompt=prompt,
+            duration_sec=duration_sec if duration_sec > 0 else None,
         )
 
     # 15分超の場合はチャンク分割処理
@@ -618,7 +643,8 @@ def transcribe_audio_with_gemini(
                 api_key=api_key,
                 model_name=model_name,
                 prompt=prompt,
-                caption_prefix=caption_prefix
+                caption_prefix=caption_prefix,
+                duration_sec=dur_sec,
             )
 
             # 相対タイムスタンプに開始秒数を加算
@@ -718,7 +744,7 @@ def execute_episode_pipeline(
     is_latest: bool = False,
     asr_engine: str = "gemini",
     gemini_key: str | None = None,
-    gemini_model: str = "gemini-3.6-flash",
+    gemini_model: str = "gemini-3.8-flash",
     podcast_name: str = "",
     is_monologue: bool = False,
     ep_published: str = "",
@@ -854,7 +880,7 @@ asr_engine = st.sidebar.selectbox(
 )
 
 whisper_model = "base"
-gemini_asr_model = "gemini-3.6-flash"
+gemini_asr_model = "gemini-3.8-flash"
 if asr_engine.startswith("Whisper"):
     whisper_model = st.sidebar.selectbox(
         "Whisper モデルサイズ",
@@ -866,13 +892,14 @@ else:
     model_choice = st.sidebar.selectbox(
         "Gemini モデル",
         [
-            "gemini-3.6-flash (標準推奨)",
-            "gemini-3.1-flash-lite (軽量モデル)",
-            "gemini-3.5-flash",
-            "gemini-3.8-flash (非推奨: 503エラー発生傾向)"
+            "gemini-3.8-flash (第一選択 / 標準推奨)",
+            "gemini-3.6-flash (標準予備)",
+            "gemini-3.5-transcribe (短尺特化: 50分未満)",
+            "gemini-3.5-flash-lite (軽量 / 高枠)",
+            "gemini-3.1-flash-lite (最終予備)"
         ],
         index=0,
-        help="音声認識および話者分離に使用するGeminiモデル (3.6-flash推奨。3.8-flashは503エラーが多発します)"
+        help="音声認識および話者分離に使用するGeminiモデル（第一選択: 3.8-flash / 失敗時は優先順位順に自動フォールバック）"
     )
     gemini_asr_model = model_choice.split()[0]
     if not gemini_key_input:

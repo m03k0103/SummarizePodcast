@@ -12,8 +12,8 @@
 
 1. **文字起こしエンジンの標準・優先設定**
    - デフォルトの文字起こしエンジンは **Gemini（マルチモーダル音声直接入力 / 話者分離対応）** とする。
-   - モデルは品質・速度・耐負荷性の観点から **`gemini-3.6-flash` を第一推奨** とする。
-   - `gemini-3.8-flash` は Google サーバー側の過負荷により 503 エラーが頻発するため、文字起こし用としては非推奨とする。
+   - モデルは優先順位に従い **`gemini-3.8-flash` を第一選択** とし、レート制限・エラー時のフォールバック順序は `gemini-3.8-flash` ➔ `gemini-3.6-flash` ➔ `gemini-3.5-transcribe`（50分未満ファイル限定） ➔ `gemini-3.5-flash-lite` ➔ `gemini-3.1-flash-lite` とする。
+   - `gemini-3.5-flash` は非推奨（内部で `gemini-3.6-flash` に自動転送）のため、選択肢およびフォールバックリストから除外する。
    - ローカル実行時は Whisper（tiny, base, small, medium, large）を使用し、FFmpeg のパス解決を確実に行うこと。
 
 2. **音声ファイル（MP3）の永続保持原則**
