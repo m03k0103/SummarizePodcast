@@ -14,6 +14,7 @@
    - デフォルトの文字起こしエンジンは **Gemini（マルチモーダル音声直接入力 / 話者分離対応）** とする。
    - モデルは優先順位に従い **`gemini-3.8-flash` を第一選択** とし、レート制限・エラー時のフォールバック順序は `gemini-3.8-flash` ➔ `gemini-3.6-flash` ➔ `gemini-3.5-transcribe`（50分未満ファイル限定） ➔ `gemini-3.5-flash-lite` ➔ `gemini-3.1-flash-lite` とする。
    - `gemini-3.5-flash` は非推奨（内部で `gemini-3.6-flash` に自動転送）のため、選択肢およびフォールバックリストから除外する。
+   - モデル別の音声チャンク分割ポリシーとして、一人語り時は `gemini-3.5-transcribe` が 45分、`gemini-3.6-flash` 等の汎用モデルは 25分（フォールバック時の自動再分割ガード付き）、複数人対談時は全モデル 15分を基準とする。
    - ローカル実行時は Whisper（tiny, base, small, medium, large）を使用し、FFmpeg のパス解決を確実に行うこと。
 
 2. **音声ファイル（MP3）の永続保持原則**

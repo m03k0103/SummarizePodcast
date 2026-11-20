@@ -157,8 +157,8 @@ def sanitize_filename(name: str) -> str:
     return name.strip("_")
 
 
-def format_duration(seconds: int | float | None) -> str:
-    if not seconds:
+def format_duration(seconds: int | float | None, allow_zero: bool = False) -> str:
+    if seconds is None or seconds < 0 or (seconds == 0 and not allow_zero):
         return "不明"
     total_sec = int(seconds)
     m, s = divmod(total_sec, 60)
@@ -356,6 +356,35 @@ GEMINI_ASR_FALLBACK_ORDER = [
     "gemini-3.1-flash-lite",
 ]
 TRANSCRIBE_MAX_DURATION_SEC = 50 * 60  # 50分未満限定 (98,304トークン上限対策)
+GEMINI_MONOLOGUE_CHUNK_MINUTES = {
+    "gemini-3.5-transcribe": 45,
+    "gemini-3.6-flash": 25,
+    "gemini-3.8-flash": 25,
+    "gemini-3.5-flash-lite": 25,
+    "gemini-3.1-flash-lite": 25,
+}
+DEFAULT_MONOLOGUE_CHUNK_MINUTES = 25
+DIALOGUE_CHUNK_MINUTES = 15
+RESPLIT_MARGIN_SEC = 3 * 60  # split_audio_into_chunks の min_chunk_minutes=3 吸収マージン
+RETRY_BACKOFF_DELAYS = (4, 8)  # 503/429 リトライ待機秒数（計3回試行）
+
+
+def get_chunk_minutes_for_model(model_name: str, is_monologue: bool) -> int:
+    """モデルと出演者構成に応じた標準チャンク分割分数（分）を返す"""
+    if not is_monologue:
+        return DIALOGUE_CHUNK_MINUTES
+    clean_model = (model_name or "gemini-3.8-flash").strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[len("models/"):]
+    return GEMINI_MONOLOGUE_CHUNK_MINUTES.get(clean_model, DEFAULT_MONOLOGUE_CHUNK_MINUTES)
+
+
+def needs_fallback_resplit(try_model: str, duration_sec: float | None, is_monologue: bool) -> bool:
+    """フォールバック先モデルに対して現在の音声尺が推奨チャンク上限を超過しているか判定"""
+    if duration_sec is None or duration_sec <= 0:
+        return False
+    target_min = get_chunk_minutes_for_model(try_model, is_monologue)
+    return duration_sec > (target_min * 60 + RESPLIT_MARGIN_SEC)
 
 
 def build_asr_candidate_models(selected_model: str, duration_sec: float | None = None) -> list[str]:
@@ -385,6 +414,8 @@ def _transcribe_single_audio_file_with_gemini(
     prompt: str,
     caption_prefix: str = "",
     duration_sec: float | None = None,
+    is_monologue: bool = False,
+    fallback_resplit_fn=None,
 ) -> str:
     """単一の音声ファイルを Gemini File API 経由でアップロードし文字起こしを実行"""
     import json
@@ -493,6 +524,11 @@ def _transcribe_single_audio_file_with_gemini(
 
         last_error = None
         for try_model in candidate_models:
+            if fallback_resplit_fn is not None and needs_fallback_resplit(try_model, duration_sec, is_monologue):
+                target_chunk_min = get_chunk_minutes_for_model(try_model, is_monologue)
+                st.caption(f"{prefix_str}🔄 {try_model} 向けに {target_chunk_min} 分単位へ再分割して処理を継続します...")
+                return fallback_resplit_fn(try_model, target_chunk_min)
+
             st.caption(f"{prefix_str}🧠 Gemini ({try_model}) で音声認識と話者分離を実行中...")
             gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent"
             gen_req = urllib.request.Request(
@@ -502,7 +538,7 @@ def _transcribe_single_audio_file_with_gemini(
                 method="POST"
             )
 
-            max_attempts = 2
+            max_attempts = len(RETRY_BACKOFF_DELAYS) + 1
             for attempt in range(max_attempts):
                 try:
                     with urllib.request.urlopen(gen_req, timeout=300) as resp:
@@ -539,8 +575,9 @@ def _transcribe_single_audio_file_with_gemini(
                     err_body = e.read().decode("utf-8", errors="ignore")
                     last_error = f"{try_model} (HTTP {e.code}): {err_body}"
                     if e.code in (429, 503) and attempt < max_attempts - 1:
-                        st.caption(f"⚠️ {try_model} が混雑中 (HTTP {e.code})。3秒待機後に再試行します...")
-                        time.sleep(3)
+                        wait_sec = RETRY_BACKOFF_DELAYS[attempt]
+                        st.caption(f"⚠️ {try_model} が混雑中 (HTTP {e.code})。{wait_sec}秒待機後に再試行します... ({attempt + 1}/{len(RETRY_BACKOFF_DELAYS)})")
+                        time.sleep(wait_sec)
                         continue
                     else:
                         st.caption(f"⚠️ {last_error}。代替モデルへフォールバックします...")
@@ -570,14 +607,17 @@ def transcribe_audio_with_gemini(
     model_name: str = "gemini-3.8-flash",
     podcast_title: str = "",
     chunk_minutes: int | None = None,
-    is_monologue: bool = False
+    is_monologue: bool = False,
+    base_offset_sec: int = 0,
+    _allow_fallback_resplit: bool = True,
 ) -> str:
     """
     Gemini Files REST API を用いて音声を文字起こし。
-    長尺音声（一人語り時は45分超、対談時は15分超）は自動でチャンク分割し、前パートの話者情報・会話コンテキストを引き継ぎながら順次文字起こし・結合する。
+    長尺音声はモデルおよび出演者構成に応じた分割分数（一人語り: gemini-3.5-transcribe は45分、
+    その他汎用モデルは25分 / 複数人対談: 15分）で自動チャンク分割し、前パートの文脈を引き継いで結合する。
     """
     if chunk_minutes is None:
-        chunk_minutes = 45 if is_monologue else 15
+        chunk_minutes = get_chunk_minutes_for_model(model_name, is_monologue)
 
     ffmpeg_path = find_ffmpeg()
     duration_sec = 0.0
@@ -587,7 +627,7 @@ def transcribe_audio_with_gemini(
         except Exception:
             duration_sec = 0.0
 
-    # 15分 (900秒) 以下、または ffmpeg 検出不能な場合は単一処理
+    # 分割閾値以下、または ffmpeg 検出不能な場合は単一処理
     threshold_sec = chunk_minutes * 60
     if not ffmpeg_path or duration_sec <= threshold_sec:
         prompt = build_chunk_prompt(
@@ -596,19 +636,46 @@ def transcribe_audio_with_gemini(
             total_chunks=1,
             is_monologue=is_monologue
         )
-        return _transcribe_single_audio_file_with_gemini(
+        resplit_used = {"flag": False}
+        resplit_cb = None
+        if ffmpeg_path and _allow_fallback_resplit:
+            def resplit_cb(fb_model: str, fb_chunk_min: int) -> str:
+                resplit_used["flag"] = True
+                return transcribe_audio_with_gemini(
+                    audio_path=audio_path,
+                    api_key=api_key,
+                    model_name=fb_model,
+                    podcast_title=podcast_title,
+                    chunk_minutes=fb_chunk_min,
+                    is_monologue=is_monologue,
+                    base_offset_sec=base_offset_sec,
+                    _allow_fallback_resplit=False,
+                )
+
+        raw_text = _transcribe_single_audio_file_with_gemini(
             audio_path=audio_path,
             api_key=api_key,
             model_name=model_name,
             prompt=prompt,
             duration_sec=duration_sec if duration_sec > 0 else None,
+            is_monologue=is_monologue,
+            fallback_resplit_fn=resplit_cb,
         )
+        if not resplit_used["flag"] and base_offset_sec > 0:
+            return adjust_timestamps(raw_text, base_offset_sec)
+        return raw_text
 
-    # 15分超の場合はチャンク分割処理
+    # 分割閾値超の場合はチャンク分割処理
     chunks = split_audio_into_chunks(audio_path, ffmpeg_path, chunk_minutes=chunk_minutes)
     total_chunks = len(chunks)
     split_reason = "一人語りの文脈維持" if is_monologue else "話者分離の精度維持"
-    st.info(f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。{split_reason}のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。")
+    clean_display_model = (model_name or "gemini-3.8-flash").strip()
+    if clean_display_model.startswith("models/"):
+        clean_display_model = clean_display_model[len("models/"):]
+    st.info(
+        f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。"
+        f"{split_reason}および {clean_display_model} の安定処理のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。"
+    )
 
     transcripts = []
     accumulated_speakers = []
@@ -622,8 +689,9 @@ def transcribe_audio_with_gemini(
                 temp_dir_to_clean = chunk_file.parent
 
             part_num = idx + 1
-            start_str = format_duration(start_sec)
-            end_str = format_duration(start_sec + dur_sec)
+            abs_start_sec = base_offset_sec + start_sec
+            start_str = format_duration(abs_start_sec, allow_zero=True)
+            end_str = format_duration(abs_start_sec + dur_sec, allow_zero=True)
             caption_prefix = f"パート {part_num}/{total_chunks} ({start_str}〜{end_str})"
             progress_bar.progress(int((idx / total_chunks) * 100), text=f"🎙️ {caption_prefix} を処理中...")
 
@@ -637,6 +705,28 @@ def transcribe_audio_with_gemini(
                 is_monologue=is_monologue
             )
 
+            resplit_used = {"flag": False}
+            resplit_cb = None
+            if _allow_fallback_resplit:
+                def resplit_cb(
+                    fb_model: str,
+                    fb_chunk_min: int,
+                    _cfile: Path = chunk_file,
+                    _offset: int = abs_start_sec,
+                    _rstate: dict = resplit_used,
+                ) -> str:
+                    _rstate["flag"] = True
+                    return transcribe_audio_with_gemini(
+                        audio_path=_cfile,
+                        api_key=api_key,
+                        model_name=fb_model,
+                        podcast_title=podcast_title,
+                        chunk_minutes=fb_chunk_min,
+                        is_monologue=is_monologue,
+                        base_offset_sec=_offset,
+                        _allow_fallback_resplit=False,
+                    )
+
             # チャンク文字起こし実行
             raw_chunk_text = _transcribe_single_audio_file_with_gemini(
                 audio_path=chunk_file,
@@ -645,10 +735,12 @@ def transcribe_audio_with_gemini(
                 prompt=prompt,
                 caption_prefix=caption_prefix,
                 duration_sec=dur_sec,
+                is_monologue=is_monologue,
+                fallback_resplit_fn=resplit_cb,
             )
 
-            # 相対タイムスタンプに開始秒数を加算
-            adjusted_text = adjust_timestamps(raw_chunk_text, start_sec)
+            # 相対タイムスタンプに開始秒数を加算（サブ分割時は既に絶対時間補正済みのため二重加算を防止）
+            adjusted_text = raw_chunk_text if resplit_used["flag"] else adjust_timestamps(raw_chunk_text, abs_start_sec)
             transcripts.append(adjusted_text)
 
             # 次パートへの引き継ぎコンテキストを抽出
@@ -893,13 +985,13 @@ else:
         "Gemini モデル",
         [
             "gemini-3.8-flash (第一選択 / 標準推奨)",
-            "gemini-3.6-flash (標準予備)",
-            "gemini-3.5-transcribe (短尺特化: 50分未満)",
+            "gemini-3.6-flash (標準予備 / 単独25分分割)",
+            "gemini-3.5-transcribe (短尺特化: 50分未満 / 単独45分分割)",
             "gemini-3.5-flash-lite (軽量 / 高枠)",
             "gemini-3.1-flash-lite (最終予備)"
         ],
         index=0,
-        help="音声認識および話者分離に使用するGeminiモデル（第一選択: 3.8-flash / 失敗時は優先順位順に自動フォールバック）"
+        help="音声認識および話者分離に使用するGeminiモデル（単独音声の標準分割サイズ: 3.5-transcribe は 45分、3.6 / 3.8 / lite系は 25分、複数人対談は全モデル 15分）"
     )
     gemini_asr_model = model_choice.split()[0]
     if not gemini_key_input:
