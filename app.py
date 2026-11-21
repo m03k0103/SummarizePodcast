@@ -1,5 +1,6 @@
 import datetime
 import gzip
+import html
 import json
 import os
 import re
@@ -32,6 +33,7 @@ from download_and_summarize_podcast import (
     fetch_episodes_from_podcast_url,
     extract_download_url,
     fetch_text,
+    normalize_text,
 )
 from audio_chunker import (
     get_audio_duration,
@@ -84,11 +86,163 @@ def get_podcast_output_dir(podcast_name: str | None = None) -> Path:
     return folder
 
 
+def canonical_filename_key(name: str) -> str:
+    """ファイル名やベース名の NFD/NFC/NFKC 差異・全角記号・大文字小文字を吸収する照合用正規化キーを生成"""
+    if not name:
+        return ""
+    normalized = normalize_text(name, single_line=True)
+    return sanitize_filename(normalized).lower()
+
+
+def strip_episode_prefix(stem: str) -> str:
+    """先頭の YYYYMMDD_ または UUID_ プレフィックスを除去してタイトル部を取り出す"""
+    if not stem:
+        return ""
+    m = re.match(
+        r"^(?:\d{8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_(.+)$",
+        stem,
+    )
+    return m.group(1) if m else stem
+
+
+def _split_output_suffix(filename: str) -> tuple[str, str] | None:
+    """ファイル名から既知の拡張子（種別）を分離して (base, kind) を返す。対象外は None"""
+    for sfx, kind in (
+        (".summary.ja.md", "summary_ja"),
+        (".summary.ja.txt", "summary_ja"),
+        (".summary.en.md", "summary_en"),
+        (".summary.en.txt", "summary_en"),
+        (".mp3", "mp3"),
+        (".txt", "txt"),
+    ):
+        if filename.endswith(sfx):
+            return filename[:-len(sfx)], kind
+    return None
+
+
+def _suffix_to_kind(suffix: str) -> str | None:
+    """拡張子指定を内部種別へマップ"""
+    if suffix in (".summary.ja.md", ".summary.ja.txt"):
+        return "summary_ja"
+    if suffix in (".summary.en.md", ".summary.en.txt"):
+        return "summary_en"
+    if suffix == ".mp3":
+        return "mp3"
+    if suffix == ".txt":
+        return "txt"
+    return None
+
+
+def build_local_output_index(podcast_name: str | None = None, output_root: Path | None = None) -> dict:
+    """
+    ローカルの Output/ 配下の実ファイルを1回スキャンし、
+    正規化ベース名および正規化タイトル部による高速照合インデックスを構築する。
+    優先順位:
+      1. 対象番組フォルダ内の正規化ベース名一致 (local_exact)
+      2. Output/ 全体の正規化ベース名一致 (global_exact)
+      3. 対象番組フォルダ内の正規化タイトル一致 (local_title)
+      4. Output/ 全体の正規化タイトル一致 (global_title)
+    ※ .summary.* は .md を .txt より優先。0 バイトファイルは未済扱いとして除外。
+    """
+    root = output_root or OUTPUT_DIR
+    preferred_dir: Path | None = None
+    if podcast_name:
+        if output_root is None:
+            preferred_dir = get_podcast_output_dir(podcast_name)
+        else:
+            direct = root / sanitize_filename(podcast_name.strip())
+            if direct.exists() and direct.is_dir():
+                preferred_dir = direct
+            else:
+                low = podcast_name.strip().lower()
+                for d in root.iterdir():
+                    if d.is_dir() and (d.name.lower() in low or low in d.name.lower()):
+                        preferred_dir = d
+                        break
+
+    index: dict[str, dict[tuple[str, str], Path]] = {
+        "local_exact": {},
+        "global_exact": {},
+        "local_title": {},
+        "global_title": {},
+    }
+
+    if not root.exists():
+        return index
+
+    def _register(bucket: dict[tuple[str, str], Path], key: tuple[str, str], path: Path) -> None:
+        existing = bucket.get(key)
+        if existing is None:
+            bucket[key] = path
+            return
+        if path.name.endswith(".md") and not existing.name.endswith(".md"):
+            bucket[key] = path
+
+    pref_resolved = preferred_dir.resolve() if preferred_dir is not None else None
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            if f.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        parsed = _split_output_suffix(f.name)
+        if not parsed:
+            continue
+        base, kind = parsed
+        exact_key = canonical_filename_key(base)
+        title_key = canonical_filename_key(strip_episode_prefix(base))
+
+        is_in_preferred = pref_resolved is not None and f.parent.resolve() == pref_resolved
+        if exact_key:
+            if is_in_preferred:
+                _register(index["local_exact"], (exact_key, kind), f)
+            _register(index["global_exact"], (exact_key, kind), f)
+        if title_key:
+            if is_in_preferred:
+                _register(index["local_title"], (title_key, kind), f)
+            _register(index["global_title"], (title_key, kind), f)
+
+    return index
+
+
+def lookup_local_output_file(
+    index: dict,
+    output_base: str,
+    suffix: str,
+    title_only: str | None = None,
+) -> Path | None:
+    """build_local_output_index で構築したインデックスからローカル実ファイルを解決"""
+    kind = _suffix_to_kind(suffix)
+    if not kind:
+        return None
+    exact_key = canonical_filename_key(output_base)
+    title_src = title_only if title_only is not None else strip_episode_prefix(output_base)
+    title_key = canonical_filename_key(title_src)
+
+    if exact_key:
+        hit = index["local_exact"].get((exact_key, kind))
+        if hit and hit.exists():
+            return hit
+        hit = index["global_exact"].get((exact_key, kind))
+        if hit and hit.exists():
+            return hit
+    if title_key:
+        hit = index["local_title"].get((title_key, kind))
+        if hit and hit.exists():
+            return hit
+        hit = index["global_title"].get((title_key, kind))
+        if hit and hit.exists():
+            return hit
+    return None
+
+
 def find_output_file(output_base: str, suffix: str, podcast_name: str | None = None) -> Path | None:
     """
     指定エピソードのファイルを探索して Path を返却。
-    1. 完全一致: {output_base}{suffix}
-    2. タイトル後方一致: *_{output_base}{suffix} (プレフィックスの違いを吸収)
+    1. 対象フォルダ・ルートでの直接完全一致（0 バイト除外）
+    2. Unicode NFKC 正規化・NFD/NFC 差異・全角記号・プレフィックス違いを吸収したローカル実態照合
     ※ .summary.* の場合は .md と .txt の相互フォールバック探索を透過的に実施
     """
     suffixes_to_try = [suffix]
@@ -97,30 +251,37 @@ def find_output_file(output_base: str, suffix: str, podcast_name: str | None = N
     elif suffix.endswith(".txt"):
         suffixes_to_try.insert(0, suffix[:-4] + ".md")
 
+    dirs_to_check = []
+    if podcast_name:
+        dirs_to_check.append(get_podcast_output_dir(podcast_name))
+    dirs_to_check.append(OUTPUT_DIR)
+
+    # 1. 直接一致パス探索（O(1) パス）
     for sfx in suffixes_to_try:
         filename = f"{output_base}{sfx}"
-        dirs_to_check = []
-        if podcast_name:
-            dirs_to_check.append(get_podcast_output_dir(podcast_name))
-        dirs_to_check.append(OUTPUT_DIR)
-
-        # 1. 完全一致探索
         for d in dirs_to_check:
             p = d / filename
-            if p.exists() and p.is_file():
-                return p
+            try:
+                if p.exists() and p.is_file() and p.stat().st_size > 0:
+                    return p
+            except OSError:
+                continue
 
-        # 2. 全サブフォルダ再帰探索（完全一致）
+    # 2. 既知拡張子なら正規化インデックス照合（NFD/NFC/NFKC・全角記号・プレフィックス違い吸収）
+    if _suffix_to_kind(suffix) is not None:
+        local_idx = build_local_output_index(podcast_name)
+        return lookup_local_output_file(local_idx, output_base, suffix)
+
+    # 3. 未知の拡張子向けフォールバック探索
+    for sfx in suffixes_to_try:
+        filename = f"{output_base}{sfx}"
         matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
         if matched:
             return matched[0]
-
-        # 3. プレフィックスの違いを吸収するタイトル後方一致探索
         for d in dirs_to_check:
             matched_wild = [f for f in d.glob(f"*_{filename}") if f.is_file()]
             if matched_wild:
                 return matched_wild[0]
-
         matched_wild_all = [f for f in OUTPUT_DIR.rglob(f"*_{filename}") if f.is_file()]
         if matched_wild_all:
             return matched_wild_all[0]
@@ -138,58 +299,14 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# スタイル
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.2rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #10B981 0%, #3B82F6 50%, #8B5CF6 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.2rem;
-    }
-    .sub-header {
-        font-size: 0.95rem;
-        color: #6B7280;
-        margin-bottom: 1.5rem;
-    }
-    .podcast-card {
-        border-radius: 12px;
-        padding: 1.25rem 1.5rem;
-        margin-bottom: 1.25rem;
-        border: 1px solid #E5E7EB;
-        background-color: #F9FAFB;
-    }
-    @media (prefers-color-scheme: dark) {
-        .podcast-card {
-            border: 1px solid #374151;
-            background-color: #1F2937;
-        }
-        .sub-header {
-            color: #9CA3AF;
-        }
-    }
-    .badge-new {
-        background-color: #EF4444;
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.85rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-    .badge-done {
-        background-color: #10B981;
-        color: white;
-        padding: 0.25rem 0.75rem;
-        border-radius: 9999px;
-        font-size: 0.85rem;
-        font-weight: 700;
-        display: inline-block;
-    }
-</style>
-""", unsafe_allow_html=True)
+# スタイル読み込み (Design.md §1.1 / BAN-09 準拠: 外部 CSS 一本化)
+def load_css(css_path: Path) -> None:
+    if css_path.exists():
+        css_content = css_path.read_text(encoding="utf-8")
+        st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
+
+
+load_css(PROJECT_ROOT / "styles.css")
 
 
 # --- ユーティリティ・管理関数 ---
@@ -199,8 +316,8 @@ def sanitize_filename(name: str) -> str:
     return name.strip("_")
 
 
-def format_duration(seconds: int | float | None) -> str:
-    if not seconds:
+def format_duration(seconds: int | float | None, allow_zero: bool = False) -> str:
+    if seconds is None or seconds < 0 or (seconds == 0 and not allow_zero):
         return "不明"
     total_sec = int(seconds)
     m, s = divmod(total_sec, 60)
@@ -336,7 +453,14 @@ def fetch_feed_data(url_or_uuid: str) -> tuple[dict, list[dict]]:
 
         data = json.loads(data_str)
         podcast_info = data.get("podcast", {})
+        if isinstance(podcast_info, dict):
+            for key in ("title", "author", "description"):
+                if podcast_info.get(key):
+                    podcast_info[key] = normalize_text(str(podcast_info[key]), single_line=(key != "description"))
         episodes = podcast_info.get("episodes", [])
+        for ep in episodes:
+            if isinstance(ep, dict) and ep.get("title"):
+                ep["title"] = normalize_text(str(ep["title"]), single_line=True)
         return podcast_info, episodes
 
     # UUID が見つからない場合は汎用パーサー
@@ -383,12 +507,74 @@ def is_episode_processed(ep_guid: str, ep_title: str, podcast_key: str = "", pod
     return False
 
 
+GEMINI_ASR_FALLBACK_ORDER = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-transcribe",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+]
+TRANSCRIBE_MAX_DURATION_SEC = 50 * 60  # 50分未満限定 (98,304トークン上限対策)
+GEMINI_MONOLOGUE_CHUNK_MINUTES = {
+    "gemini-3.5-transcribe": 45,
+    "gemini-3.6-flash": 25,
+    "gemini-3.8-flash": 25,
+    "gemini-3.5-flash-lite": 25,
+    "gemini-3.1-flash-lite": 25,
+}
+DEFAULT_MONOLOGUE_CHUNK_MINUTES = 25
+DIALOGUE_CHUNK_MINUTES = 15
+RESPLIT_MARGIN_SEC = 3 * 60  # split_audio_into_chunks の min_chunk_minutes=3 吸収マージン
+RETRY_BACKOFF_DELAYS = (4, 8)  # 503/429 リトライ待機秒数（計3回試行）
+
+
+def get_chunk_minutes_for_model(model_name: str, is_monologue: bool) -> int:
+    """モデルと出演者構成に応じた標準チャンク分割分数（分）を返す"""
+    if not is_monologue:
+        return DIALOGUE_CHUNK_MINUTES
+    clean_model = (model_name or "gemini-3.8-flash").strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[len("models/"):]
+    return GEMINI_MONOLOGUE_CHUNK_MINUTES.get(clean_model, DEFAULT_MONOLOGUE_CHUNK_MINUTES)
+
+
+def needs_fallback_resplit(try_model: str, duration_sec: float | None, is_monologue: bool) -> bool:
+    """フォールバック先モデルに対して現在の音声尺が推奨チャンク上限を超過しているか判定"""
+    if duration_sec is None or duration_sec <= 0:
+        return False
+    target_min = get_chunk_minutes_for_model(try_model, is_monologue)
+    return duration_sec > (target_min * 60 + RESPLIT_MARGIN_SEC)
+
+
+def build_asr_candidate_models(selected_model: str, duration_sec: float | None = None) -> list[str]:
+    """音声尺(50分未満制限)と優先順位に基づきASR候補モデルリストを構築"""
+    clean_model = (selected_model or "gemini-3.8-flash").strip()
+    if clean_model.startswith("models/"):
+        clean_model = clean_model[len("models/"):]
+
+    allow_transcribe = duration_sec is not None and 0 < duration_sec < TRANSCRIBE_MAX_DURATION_SEC
+    candidates: list[str] = []
+
+    if clean_model != "gemini-3.5-transcribe" or allow_transcribe:
+        candidates.append(clean_model)
+
+    for fallback in GEMINI_ASR_FALLBACK_ORDER:
+        if fallback == "gemini-3.5-transcribe" and not allow_transcribe:
+            continue
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
 def _transcribe_single_audio_file_with_gemini(
     audio_path: Path,
     api_key: str,
     model_name: str,
     prompt: str,
-    caption_prefix: str = ""
+    caption_prefix: str = "",
+    duration_sec: float | None = None,
+    is_monologue: bool = False,
+    fallback_resplit_fn=None,
 ) -> str:
     """単一の音声ファイルを Gemini File API 経由でアップロードし文字起こしを実行"""
     import json
@@ -465,14 +651,7 @@ def _transcribe_single_audio_file_with_gemini(
             raise ValueError("Gemini サーバー側での音声ファイル処理に失敗しました。")
 
         # 4. generateContent による文字起こし＆話者分離 (フォールバック機構付き)
-        clean_model = model_name
-        if clean_model.startswith("models/"):
-            clean_model = clean_model[len("models/"):]
-
-        candidate_models = [clean_model]
-        for fallback in ["gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash"]:
-            if fallback not in candidate_models:
-                candidate_models.append(fallback)
+        candidate_models = build_asr_candidate_models(model_name, duration_sec=duration_sec)
 
         req_body = {
             "contents": [
@@ -504,6 +683,11 @@ def _transcribe_single_audio_file_with_gemini(
 
         last_error = None
         for try_model in candidate_models:
+            if fallback_resplit_fn is not None and needs_fallback_resplit(try_model, duration_sec, is_monologue):
+                target_chunk_min = get_chunk_minutes_for_model(try_model, is_monologue)
+                st.caption(f"{prefix_str}🔄 {try_model} 向けに {target_chunk_min} 分単位へ再分割して処理を継続します...")
+                return fallback_resplit_fn(try_model, target_chunk_min)
+
             st.caption(f"{prefix_str}🧠 Gemini ({try_model}) で音声認識と話者分離を実行中...")
             gen_url = f"https://generativelanguage.googleapis.com/v1beta/models/{try_model}:generateContent"
             gen_req = urllib.request.Request(
@@ -513,7 +697,7 @@ def _transcribe_single_audio_file_with_gemini(
                 method="POST"
             )
 
-            max_attempts = 2
+            max_attempts = len(RETRY_BACKOFF_DELAYS) + 1
             for attempt in range(max_attempts):
                 try:
                     with urllib.request.urlopen(gen_req, timeout=300) as resp:
@@ -550,8 +734,9 @@ def _transcribe_single_audio_file_with_gemini(
                     err_body = e.read().decode("utf-8", errors="ignore")
                     last_error = f"{try_model} (HTTP {e.code}): {err_body}"
                     if e.code in (429, 503) and attempt < max_attempts - 1:
-                        st.caption(f"⚠️ {try_model} が混雑中 (HTTP {e.code})。3秒待機後に再試行します...")
-                        time.sleep(3)
+                        wait_sec = RETRY_BACKOFF_DELAYS[attempt]
+                        st.caption(f"⚠️ {try_model} が混雑中 (HTTP {e.code})。{wait_sec}秒待機後に再試行します... ({attempt + 1}/{len(RETRY_BACKOFF_DELAYS)})")
+                        time.sleep(wait_sec)
                         continue
                     else:
                         st.caption(f"⚠️ {last_error}。代替モデルへフォールバックします...")
@@ -578,17 +763,20 @@ def _transcribe_single_audio_file_with_gemini(
 def transcribe_audio_with_gemini(
     audio_path: Path,
     api_key: str,
-    model_name: str = "gemini-3.6-flash",
+    model_name: str = "gemini-3.8-flash",
     podcast_title: str = "",
     chunk_minutes: int | None = None,
-    is_monologue: bool = False
+    is_monologue: bool = False,
+    base_offset_sec: int = 0,
+    _allow_fallback_resplit: bool = True,
 ) -> str:
     """
     Gemini Files REST API を用いて音声を文字起こし。
-    長尺音声（一人語り時は45分超、対談時は15分超）は自動でチャンク分割し、前パートの話者情報・会話コンテキストを引き継ぎながら順次文字起こし・結合する。
+    長尺音声はモデルおよび出演者構成に応じた分割分数（一人語り: gemini-3.5-transcribe は45分、
+    その他汎用モデルは25分 / 複数人対談: 15分）で自動チャンク分割し、前パートの文脈を引き継いで結合する。
     """
     if chunk_minutes is None:
-        chunk_minutes = 45 if is_monologue else 15
+        chunk_minutes = get_chunk_minutes_for_model(model_name, is_monologue)
 
     ffmpeg_path = find_ffmpeg()
     duration_sec = 0.0
@@ -598,7 +786,7 @@ def transcribe_audio_with_gemini(
         except Exception:
             duration_sec = 0.0
 
-    # 15分 (900秒) 以下、または ffmpeg 検出不能な場合は単一処理
+    # 分割閾値以下、または ffmpeg 検出不能な場合は単一処理
     threshold_sec = chunk_minutes * 60
     if not ffmpeg_path or duration_sec <= threshold_sec:
         prompt = build_chunk_prompt(
@@ -607,18 +795,46 @@ def transcribe_audio_with_gemini(
             total_chunks=1,
             is_monologue=is_monologue
         )
-        return _transcribe_single_audio_file_with_gemini(
+        resplit_used = {"flag": False}
+        resplit_cb = None
+        if ffmpeg_path and _allow_fallback_resplit:
+            def resplit_cb(fb_model: str, fb_chunk_min: int) -> str:
+                resplit_used["flag"] = True
+                return transcribe_audio_with_gemini(
+                    audio_path=audio_path,
+                    api_key=api_key,
+                    model_name=fb_model,
+                    podcast_title=podcast_title,
+                    chunk_minutes=fb_chunk_min,
+                    is_monologue=is_monologue,
+                    base_offset_sec=base_offset_sec,
+                    _allow_fallback_resplit=False,
+                )
+
+        raw_text = _transcribe_single_audio_file_with_gemini(
             audio_path=audio_path,
             api_key=api_key,
             model_name=model_name,
-            prompt=prompt
+            prompt=prompt,
+            duration_sec=duration_sec if duration_sec > 0 else None,
+            is_monologue=is_monologue,
+            fallback_resplit_fn=resplit_cb,
         )
+        if not resplit_used["flag"] and base_offset_sec > 0:
+            return adjust_timestamps(raw_text, base_offset_sec)
+        return raw_text
 
-    # 15分超の場合はチャンク分割処理
+    # 分割閾値超の場合はチャンク分割処理
     chunks = split_audio_into_chunks(audio_path, ffmpeg_path, chunk_minutes=chunk_minutes)
     total_chunks = len(chunks)
     split_reason = "一人語りの文脈維持" if is_monologue else "話者分離の精度維持"
-    st.info(f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。{split_reason}のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。")
+    clean_display_model = (model_name or "gemini-3.8-flash").strip()
+    if clean_display_model.startswith("models/"):
+        clean_display_model = clean_display_model[len("models/"):]
+    st.info(
+        f"⏱️ 長尺音声（{format_duration(duration_sec)}）を検出しました。"
+        f"{split_reason}および {clean_display_model} の安定処理のため {total_chunks} 個のパート（各 {chunk_minutes} 分）に自動分割して順次文字起こしを実行します。"
+    )
 
     transcripts = []
     accumulated_speakers = []
@@ -632,8 +848,9 @@ def transcribe_audio_with_gemini(
                 temp_dir_to_clean = chunk_file.parent
 
             part_num = idx + 1
-            start_str = format_duration(start_sec)
-            end_str = format_duration(start_sec + dur_sec)
+            abs_start_sec = base_offset_sec + start_sec
+            start_str = format_duration(abs_start_sec, allow_zero=True)
+            end_str = format_duration(abs_start_sec + dur_sec, allow_zero=True)
             caption_prefix = f"パート {part_num}/{total_chunks} ({start_str}〜{end_str})"
             progress_bar.progress(int((idx / total_chunks) * 100), text=f"🎙️ {caption_prefix} を処理中...")
 
@@ -647,17 +864,42 @@ def transcribe_audio_with_gemini(
                 is_monologue=is_monologue
             )
 
+            resplit_used = {"flag": False}
+            resplit_cb = None
+            if _allow_fallback_resplit:
+                def resplit_cb(
+                    fb_model: str,
+                    fb_chunk_min: int,
+                    _cfile: Path = chunk_file,
+                    _offset: int = abs_start_sec,
+                    _rstate: dict = resplit_used,
+                ) -> str:
+                    _rstate["flag"] = True
+                    return transcribe_audio_with_gemini(
+                        audio_path=_cfile,
+                        api_key=api_key,
+                        model_name=fb_model,
+                        podcast_title=podcast_title,
+                        chunk_minutes=fb_chunk_min,
+                        is_monologue=is_monologue,
+                        base_offset_sec=_offset,
+                        _allow_fallback_resplit=False,
+                    )
+
             # チャンク文字起こし実行
             raw_chunk_text = _transcribe_single_audio_file_with_gemini(
                 audio_path=chunk_file,
                 api_key=api_key,
                 model_name=model_name,
                 prompt=prompt,
-                caption_prefix=caption_prefix
+                caption_prefix=caption_prefix,
+                duration_sec=dur_sec,
+                is_monologue=is_monologue,
+                fallback_resplit_fn=resplit_cb,
             )
 
-            # 相対タイムスタンプに開始秒数を加算
-            adjusted_text = adjust_timestamps(raw_chunk_text, start_sec)
+            # 相対タイムスタンプに開始秒数を加算（サブ分割時は既に絶対時間補正済みのため二重加算を防止）
+            adjusted_text = raw_chunk_text if resplit_used["flag"] else adjust_timestamps(raw_chunk_text, abs_start_sec)
             transcripts.append(adjusted_text)
 
             # 次パートへの引き継ぎコンテキストを抽出
@@ -753,7 +995,7 @@ def execute_episode_pipeline(
     is_latest: bool = False,
     asr_engine: str = "gemini",
     gemini_key: str | None = None,
-    gemini_model: str = "gemini-3.6-flash",
+    gemini_model: str = "gemini-3.8-flash",
     podcast_name: str = "",
     is_monologue: bool = False,
     ep_published: str = "",
@@ -847,7 +1089,7 @@ def execute_episode_pipeline(
 
 
 # --- サイドバー設定 ---
-st.sidebar.title("⚙️ 設定 & 環境")
+st.sidebar.title("⚙️ 設定")
 
 st.sidebar.subheader("🤖 AI 要約設定")
 llm_provider = st.sidebar.selectbox(
@@ -885,29 +1127,30 @@ asr_engine = st.sidebar.selectbox(
         "Whisper (ローカルモデル)"
     ],
     index=0,
-    help="Gemini: 音声を直接Geminiに渡して話者分離付きで高速文字起こし / Whisper: PC上でローカル実行"
+    help="Gemini: 音声を直接Geminiに渡して話者分離付きで文字起こし / Whisper: PC上でローカル実行"
 )
 
 whisper_model = "base"
-gemini_asr_model = "gemini-3.6-flash"
+gemini_asr_model = "gemini-3.8-flash"
 if asr_engine.startswith("Whisper"):
     whisper_model = st.sidebar.selectbox(
         "Whisper モデルサイズ",
         ["tiny", "base", "small", "medium", "large"],
         index=0,
-        help="tiny: 最速・省メモリ / base: 標準 / small・medium: 高精度"
+        help="tiny: 軽量 / base: 標準 / small, medium, large: 拡張モデル"
     )
 else:
     model_choice = st.sidebar.selectbox(
         "Gemini モデル",
         [
-            "gemini-3.6-flash (推奨・高精度・安定)",
-            "gemini-3.1-flash-lite (高速・軽量・安定)",
-            "gemini-3.5-flash",
-            "gemini-3.8-flash (⚠️混雑のため503失敗多め)"
+            "gemini-3.8-flash (第一選択 / 標準推奨)",
+            "gemini-3.6-flash (標準予備 / 単独25分分割)",
+            "gemini-3.5-transcribe (短尺特化: 50分未満 / 単独45分分割)",
+            "gemini-3.5-flash-lite (軽量 / 高枠)",
+            "gemini-3.1-flash-lite (最終予備)"
         ],
         index=0,
-        help="音声認識＆話者分離に使用するGeminiモデル (3.6-flash推奨。3.8-flashはGoogle側混雑のため現在503エラーが多発します)"
+        help="音声認識および話者分離に使用するGeminiモデル（単独音声の標準分割サイズ: 3.5-transcribe は 45分、3.6 / 3.8 / lite系は 25分、複数人対談は全モデル 15分）"
     )
     gemini_asr_model = model_choice.split()[0]
     if not gemini_key_input:
@@ -927,7 +1170,7 @@ else:
 
 # --- メインエリア ---
 st.markdown('<div class="main-header">🎙️ Podcast AI Summarizer</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">任意のポッドキャストを自動監視 ➔ ダウンロード ➔ Whisper 文字起こし ➔ AI 日英要約</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">ポッドキャストの監視 ➔ 音声取得 ➔ 文字起こし ➔ AI 要約</div>', unsafe_allow_html=True)
 
 # ポッドキャスト選択・入力バー
 saved_podcasts = load_saved_podcasts()
@@ -1034,33 +1277,33 @@ if selected_option == "✏️ URLを直接指定" and active_url.strip() and epi
 
 # 番組メタデータの表示
 if podcast_info and episodes:
-    p_title = podcast_info.get("title") or selected_option
-    p_author = podcast_info.get("author") or "不明"
-    p_desc = podcast_info.get("description") or ""
-    
+    p_title = normalize_text(podcast_info.get("title") or selected_option, single_line=True)
+    p_author = normalize_text(podcast_info.get("author") or "不明", single_line=True)
+    p_desc = normalize_text(podcast_info.get("description") or "", single_line=True)
+    p_desc_short = p_desc[:220] + ("..." if len(p_desc) > 220 else "")
+
     st.markdown(f"""
 <div class="podcast-card">
-    <div style="font-size: 1.25rem; font-weight: bold; margin-bottom: 0.3rem;">{p_title}</div>
-    <div style="font-size: 0.88rem; color: #6B7280; margin-bottom: 0.5rem;">👤 <b>配信者:</b> {p_author} &nbsp;&nbsp;|&nbsp;&nbsp; 📦 <b>取得エピソード数:</b> {len(episodes)} 件</div>
-    <div style="font-size: 0.85rem; color: #4B5563;">{p_desc[:250] + ('...' if len(p_desc) > 250 else '')}</div>
+    <div class="podcast-card-title">{html.escape(p_title)}</div>
+    <div class="podcast-card-meta">👤 <b>配信者:</b> {html.escape(p_author)} &nbsp;&nbsp;|&nbsp;&nbsp; 📦 <b>エピソード数:</b> {len(episodes)} 件</div>
+    <div class="podcast-card-desc">{html.escape(p_desc_short)}</div>
 </div>
 """, unsafe_allow_html=True)
 
 
 # タブ構成 (エピソード一覧・テキスト要約・アーカイブの3大構成)
 tab1, tab2, tab3 = st.tabs([
-    "📋 エピソード一覧 & 要約処理",
-    "📄 テキストファイル要約",
-    "📚 要約アーカイブ閲覧"
+    "📋 エピソード一覧",
+    "📄 テキスト要約",
+    "📚 アーカイブ閲覧"
 ])
 
 
 # ==========================================
-# タブ 1: 📋 エピソード一覧 & 要約処理 (統合タブ)
+# タブ 1: 📋 エピソード一覧 (統合タブ)
 # ==========================================
 with tab1:
-    st.subheader("📋 エピソード一覧 & 処理ステータス")
-    st.caption("ポッドキャストの全エピソードの音声・要約の処理状況を確認し、チェックボックスで選択して「音声ダウンロードのみ」または「要約実行」を行えます。")
+    st.subheader("📋 エピソード一覧")
 
     col_btn, col_blank = st.columns([1, 4])
     with col_btn:
@@ -1071,6 +1314,9 @@ with tab1:
     if not episodes:
         st.info("ポッドキャストのURLを指定すると、エピソード一覧が表示されます。")
     else:
+        # ローカルの出力実ファイルを一括スキャン（NFD/NFC差異・全角記号・プレフィックス違いを吸収）
+        local_index = build_local_output_index(p_title)
+
         # エピソードごとの処理状態を判定
         table_rows = []
         for idx, ep in enumerate(episodes):
@@ -1084,10 +1330,10 @@ with tab1:
             prefix = ymd if ymd else (t_guid if t_guid else "")
             output_base = f"{prefix}_{safe_title}" if prefix else safe_title
 
-            audio_file = find_output_file(output_base, ".mp3", p_title)
+            audio_file = lookup_local_output_file(local_index, output_base, ".mp3", title_only=safe_title)
             has_audio = bool(audio_file and audio_file.exists() and audio_file.stat().st_size > 0)
-            summary_file = find_output_file(output_base, ".summary.ja.md", p_title)
-            has_summary = bool(summary_file and summary_file.exists())
+            summary_file = lookup_local_output_file(local_index, output_base, ".summary.ja.md", title_only=safe_title)
+            has_summary = bool(summary_file and summary_file.exists() and summary_file.stat().st_size > 0)
 
             table_rows.append({
                 "選択": False,
@@ -1140,6 +1386,19 @@ with tab1:
         # セッションの選択状態を DataFrame に適用
         df_episodes["選択"] = st.session_state[select_state_key]
 
+        # 高密度1行ステータスバー (Design.md §1.4-2)
+        total_eps = len(table_rows)
+        audio_done_cnt = sum(1 for r in table_rows if r["_has_audio"])
+        summary_done_cnt = sum(1 for r in table_rows if r["_has_summary"])
+        st.markdown(
+            f'<div class="status-strip">'
+            f'<span class="status-strip-item"><span class="status-strip-label">全エピソード:</span> <span class="status-strip-value">{total_eps} 件</span></span>'
+            f'<span class="status-strip-item"><span class="status-strip-label">音声DL済:</span> <span class="status-strip-value">{audio_done_cnt} 件</span></span>'
+            f'<span class="status-strip-item"><span class="status-strip-label">要約済:</span> <span class="status-strip-value">{summary_done_cnt} 件</span></span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
         # エピソード一覧表 (st.data_editor)
         edited_df = st.data_editor(
             df_episodes[["選択", "No", "公開日", "タイトル", "再生時間", "音声データ", "要約データ", "_idx"]],
@@ -1171,11 +1430,11 @@ with tab1:
         with col_cfg1:
             tab1_dialogue_mode = st.radio(
                 "出演者構成（話者分離設定）",
-                ["👥 対談・複数人（話者分離あり）", "🎙️ 一人語り・単独（話者分離なし）"],
+                ["👥 複数人対談（話者分離あり）", "🎙️ 単独出演（話者分離なし）"],
                 index=1 if current_podcast_is_monologue else 0,
                 horizontal=True,
                 key=f"tab1_dialogue_mode_{podcast_key}",
-                help="選択したエピソード群の出演者構成を指定します（デフォルト: この番組の標準設定）。個別の対談回・一人語り回に合わせて変更可能です。"
+                help="選択したエピソード群の出演者構成を指定します（初期値: この番組の標準設定）。個別回に合わせて変更可能です。"
             )
             tab1_is_monologue = tab1_dialogue_mode.startswith("🎙️")
 
@@ -1296,7 +1555,7 @@ with tab1:
         result_data = st.session_state.get("last_result")
         if result_data:
             st.markdown("---")
-            st.subheader(f"📄 最新の要約・文字起こし結果: {result_data['title']}")
+            st.subheader(f"📄 処理結果: {normalize_text(result_data['title'], single_line=True)}")
 
             res_tab1, res_tab2, res_tab3, res_tab4 = st.tabs(["🇯🇵 日本語要約", "🇬🇧 英語要約", "📝 全文文字起こし", "🎧 音声 (MP3)"])
             with res_tab1:
@@ -1304,7 +1563,8 @@ with tab1:
                     "📥 日本語要約 (.md) をダウンロード",
                     data=result_data["ja"],
                     file_name=f"{result_data['base_name']}.summary.ja.md",
-                    mime="text/markdown"
+                    mime="text/markdown",
+                    key="res_dl_ja"
                 )
                 st.markdown(result_data["ja"])
 
@@ -1314,7 +1574,8 @@ with tab1:
                         "📥 英語要約 (.md) をダウンロード",
                         data=result_data["en"],
                         file_name=f"{result_data['base_name']}.summary.en.md",
-                        mime="text/markdown"
+                        mime="text/markdown",
+                        key="res_dl_en"
                     )
                     st.markdown(result_data["en"])
                 else:
@@ -1325,9 +1586,10 @@ with tab1:
                     "📥 文字起こしテキスト (.txt) をダウンロード",
                     data=result_data["transcript"],
                     file_name=f"{result_data['base_name']}.txt",
-                    mime="text/plain"
+                    mime="text/plain",
+                    key="res_dl_txt"
                 )
-                st.text_area("文字起こし本文", value=result_data["transcript"], height=400)
+                st.text_area("文字起こし本文", value=result_data["transcript"], height=400, key="res_transcript_area")
 
             with res_tab4:
                 p_name = result_data.get("podcast_name", "")
@@ -1335,7 +1597,7 @@ with tab1:
                 if af and af.exists():
                     st.audio(str(af))
                     with open(af, "rb") as f_bin:
-                        st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=f_bin.read(), file_name=af.name, mime="audio/mpeg")
+                        st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=f_bin.read(), file_name=af.name, mime="audio/mpeg", key="res_dl_mp3")
                 else:
                     st.caption("ローカル音声ファイルがありません")
 
@@ -1381,7 +1643,7 @@ with tab2:
 # タブ 3: 📚 要約アーカイブ閲覧
 # ==========================================
 with tab3:
-    st.subheader("📚 保存済み要約・文字起こし・音声アーカイブ")
+    st.subheader("📚 保存済みアーカイブ")
     all_files = [f for f in OUTPUT_DIR.rglob("*") if f.is_file()]
 
     if not all_files:
@@ -1393,24 +1655,26 @@ with tab3:
             rel_dir = f.parent.relative_to(OUTPUT_DIR)
             category = str(rel_dir).replace("\\", "/") if str(rel_dir) != "." else "（未分類）"
 
+            parsed = _split_output_suffix(name)
+            if not parsed:
+                continue
+            base, _ = parsed
+            canon_base = canonical_filename_key(base)
+            rec = grouped_records.setdefault((category, canon_base), {})
+            rec.setdefault("display_base", normalize_text(base, single_line=True))
+
             if name.endswith(".summary.ja.md"):
-                base = name[:-len(".summary.ja.md")]
-                grouped_records.setdefault((category, base), {})["ja"] = f
+                rec["ja"] = f
             elif name.endswith(".summary.ja.txt"):
-                base = name[:-len(".summary.ja.txt")]
-                grouped_records.setdefault((category, base), {})["ja"] = f
+                rec.setdefault("ja", f)
             elif name.endswith(".summary.en.md"):
-                base = name[:-len(".summary.en.md")]
-                grouped_records.setdefault((category, base), {})["en"] = f
+                rec["en"] = f
             elif name.endswith(".summary.en.txt"):
-                base = name[:-len(".summary.en.txt")]
-                grouped_records.setdefault((category, base), {})["en"] = f
+                rec.setdefault("en", f)
             elif name.endswith(".txt"):
-                base = name[:-len(".txt")]
-                grouped_records.setdefault((category, base), {})["txt"] = f
+                rec["txt"] = f
             elif name.endswith(".mp3"):
-                base = name[:-len(".mp3")]
-                grouped_records.setdefault((category, base), {})["mp3"] = f
+                rec["mp3"] = f
 
         # ポッドキャスト番組一覧で絞り込み
         all_categories = sorted(list({k[0] for k in grouped_records.keys()}))
@@ -1421,18 +1685,20 @@ with tab3:
 
         # 候補一覧の生成
         items = []
-        for (cat, base), rec in grouped_records.items():
+        for (cat, canon_base), rec in grouped_records.items():
             if selected_cat != "すべて表示" and cat != selected_cat:
                 continue
-            display_label = f"[{cat}] {base}" if selected_cat == "すべて表示" else base
-            items.append((display_label, cat, base, rec))
+            display_base = rec.get("display_base") or canon_base
+            display_label = f"[{cat}] {display_base}" if selected_cat == "すべて表示" else display_base
+            items.append((display_label, cat, display_base, rec))
 
         items.sort(key=lambda x: x[0], reverse=True)
 
         with col_srch:
             search_query = st.text_input("🔍 アーカイブを検索（タイトルやGUID、キーワード）", "")
         if search_query.strip():
-            items = [it for it in items if search_query.lower() in it[0].lower()]
+            q_norm = normalize_text(search_query, single_line=True).lower()
+            items = [it for it in items if q_norm in normalize_text(it[0], single_line=True).lower()]
 
         if not items:
             st.info("検索条件に一致するアーカイブが見つかりませんでした。")
@@ -1449,7 +1715,7 @@ with tab3:
                 with arc_tab1:
                     if "ja" in rec:
                         ja_c = rec["ja"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 日本語要約 (.md) をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/markdown")
+                        st.download_button("📥 日本語要約 (.md) をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/markdown", key="arc_dl_ja")
                         st.markdown(ja_c)
                     else:
                         st.caption("日本語要約ファイルがありません")
@@ -1457,7 +1723,7 @@ with tab3:
                 with arc_tab2:
                     if "en" in rec:
                         en_c = rec["en"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 英語要約 (.md) をダウンロード", en_c, file_name=rec["en"].name, mime="text/markdown")
+                        st.download_button("📥 英語要約 (.md) をダウンロード", en_c, file_name=rec["en"].name, mime="text/markdown", key="arc_dl_en")
                         st.markdown(en_c)
                     else:
                         st.caption("英語要約ファイルがありません")
@@ -1465,8 +1731,8 @@ with tab3:
                 with arc_tab3:
                     if "txt" in rec:
                         txt_c = rec["txt"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 文字起こしテキストをダウンロード", txt_c, file_name=rec["txt"].name, mime="text/plain")
-                        st.text_area("全文テキスト", txt_c, height=450)
+                        st.download_button("📥 文字起こしテキストをダウンロード", txt_c, file_name=rec["txt"].name, mime="text/plain", key="arc_dl_txt")
+                        st.text_area("全文テキスト", txt_c, height=450, key="arc_transcript_area")
                     else:
                         st.caption("文字起こしファイルがありません")
 
@@ -1475,7 +1741,7 @@ with tab3:
                         mp3_f = rec["mp3"]
                         st.audio(str(mp3_f))
                         with open(mp3_f, "rb") as af:
-                            st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=af.read(), file_name=mp3_f.name, mime="audio/mpeg")
+                            st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=af.read(), file_name=mp3_f.name, mime="audio/mpeg", key="arc_dl_mp3")
                     else:
                         st.caption("ローカル音声ファイルがありません")
 
