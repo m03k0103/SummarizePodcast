@@ -86,11 +86,163 @@ def get_podcast_output_dir(podcast_name: str | None = None) -> Path:
     return folder
 
 
+def canonical_filename_key(name: str) -> str:
+    """ファイル名やベース名の NFD/NFC/NFKC 差異・全角記号・大文字小文字を吸収する照合用正規化キーを生成"""
+    if not name:
+        return ""
+    normalized = normalize_text(name, single_line=True)
+    return sanitize_filename(normalized).lower()
+
+
+def strip_episode_prefix(stem: str) -> str:
+    """先頭の YYYYMMDD_ または UUID_ プレフィックスを除去してタイトル部を取り出す"""
+    if not stem:
+        return ""
+    m = re.match(
+        r"^(?:\d{8}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})_(.+)$",
+        stem,
+    )
+    return m.group(1) if m else stem
+
+
+def _split_output_suffix(filename: str) -> tuple[str, str] | None:
+    """ファイル名から既知の拡張子（種別）を分離して (base, kind) を返す。対象外は None"""
+    for sfx, kind in (
+        (".summary.ja.md", "summary_ja"),
+        (".summary.ja.txt", "summary_ja"),
+        (".summary.en.md", "summary_en"),
+        (".summary.en.txt", "summary_en"),
+        (".mp3", "mp3"),
+        (".txt", "txt"),
+    ):
+        if filename.endswith(sfx):
+            return filename[:-len(sfx)], kind
+    return None
+
+
+def _suffix_to_kind(suffix: str) -> str | None:
+    """拡張子指定を内部種別へマップ"""
+    if suffix in (".summary.ja.md", ".summary.ja.txt"):
+        return "summary_ja"
+    if suffix in (".summary.en.md", ".summary.en.txt"):
+        return "summary_en"
+    if suffix == ".mp3":
+        return "mp3"
+    if suffix == ".txt":
+        return "txt"
+    return None
+
+
+def build_local_output_index(podcast_name: str | None = None, output_root: Path | None = None) -> dict:
+    """
+    ローカルの Output/ 配下の実ファイルを1回スキャンし、
+    正規化ベース名および正規化タイトル部による高速照合インデックスを構築する。
+    優先順位:
+      1. 対象番組フォルダ内の正規化ベース名一致 (local_exact)
+      2. Output/ 全体の正規化ベース名一致 (global_exact)
+      3. 対象番組フォルダ内の正規化タイトル一致 (local_title)
+      4. Output/ 全体の正規化タイトル一致 (global_title)
+    ※ .summary.* は .md を .txt より優先。0 バイトファイルは未済扱いとして除外。
+    """
+    root = output_root or OUTPUT_DIR
+    preferred_dir: Path | None = None
+    if podcast_name:
+        if output_root is None:
+            preferred_dir = get_podcast_output_dir(podcast_name)
+        else:
+            direct = root / sanitize_filename(podcast_name.strip())
+            if direct.exists() and direct.is_dir():
+                preferred_dir = direct
+            else:
+                low = podcast_name.strip().lower()
+                for d in root.iterdir():
+                    if d.is_dir() and (d.name.lower() in low or low in d.name.lower()):
+                        preferred_dir = d
+                        break
+
+    index: dict[str, dict[tuple[str, str], Path]] = {
+        "local_exact": {},
+        "global_exact": {},
+        "local_title": {},
+        "global_title": {},
+    }
+
+    if not root.exists():
+        return index
+
+    def _register(bucket: dict[tuple[str, str], Path], key: tuple[str, str], path: Path) -> None:
+        existing = bucket.get(key)
+        if existing is None:
+            bucket[key] = path
+            return
+        if path.name.endswith(".md") and not existing.name.endswith(".md"):
+            bucket[key] = path
+
+    pref_resolved = preferred_dir.resolve() if preferred_dir is not None else None
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        try:
+            if f.stat().st_size <= 0:
+                continue
+        except OSError:
+            continue
+        parsed = _split_output_suffix(f.name)
+        if not parsed:
+            continue
+        base, kind = parsed
+        exact_key = canonical_filename_key(base)
+        title_key = canonical_filename_key(strip_episode_prefix(base))
+
+        is_in_preferred = pref_resolved is not None and f.parent.resolve() == pref_resolved
+        if exact_key:
+            if is_in_preferred:
+                _register(index["local_exact"], (exact_key, kind), f)
+            _register(index["global_exact"], (exact_key, kind), f)
+        if title_key:
+            if is_in_preferred:
+                _register(index["local_title"], (title_key, kind), f)
+            _register(index["global_title"], (title_key, kind), f)
+
+    return index
+
+
+def lookup_local_output_file(
+    index: dict,
+    output_base: str,
+    suffix: str,
+    title_only: str | None = None,
+) -> Path | None:
+    """build_local_output_index で構築したインデックスからローカル実ファイルを解決"""
+    kind = _suffix_to_kind(suffix)
+    if not kind:
+        return None
+    exact_key = canonical_filename_key(output_base)
+    title_src = title_only if title_only is not None else strip_episode_prefix(output_base)
+    title_key = canonical_filename_key(title_src)
+
+    if exact_key:
+        hit = index["local_exact"].get((exact_key, kind))
+        if hit and hit.exists():
+            return hit
+        hit = index["global_exact"].get((exact_key, kind))
+        if hit and hit.exists():
+            return hit
+    if title_key:
+        hit = index["local_title"].get((title_key, kind))
+        if hit and hit.exists():
+            return hit
+        hit = index["global_title"].get((title_key, kind))
+        if hit and hit.exists():
+            return hit
+    return None
+
+
 def find_output_file(output_base: str, suffix: str, podcast_name: str | None = None) -> Path | None:
     """
     指定エピソードのファイルを探索して Path を返却。
-    1. 完全一致: {output_base}{suffix}
-    2. タイトル後方一致: *_{output_base}{suffix} (プレフィックスの違いを吸収)
+    1. 対象フォルダ・ルートでの直接完全一致（0 バイト除外）
+    2. Unicode NFKC 正規化・NFD/NFC 差異・全角記号・プレフィックス違いを吸収したローカル実態照合
     ※ .summary.* の場合は .md と .txt の相互フォールバック探索を透過的に実施
     """
     suffixes_to_try = [suffix]
@@ -99,30 +251,37 @@ def find_output_file(output_base: str, suffix: str, podcast_name: str | None = N
     elif suffix.endswith(".txt"):
         suffixes_to_try.insert(0, suffix[:-4] + ".md")
 
+    dirs_to_check = []
+    if podcast_name:
+        dirs_to_check.append(get_podcast_output_dir(podcast_name))
+    dirs_to_check.append(OUTPUT_DIR)
+
+    # 1. 直接一致パス探索（O(1) パス）
     for sfx in suffixes_to_try:
         filename = f"{output_base}{sfx}"
-        dirs_to_check = []
-        if podcast_name:
-            dirs_to_check.append(get_podcast_output_dir(podcast_name))
-        dirs_to_check.append(OUTPUT_DIR)
-
-        # 1. 完全一致探索
         for d in dirs_to_check:
             p = d / filename
-            if p.exists() and p.is_file():
-                return p
+            try:
+                if p.exists() and p.is_file() and p.stat().st_size > 0:
+                    return p
+            except OSError:
+                continue
 
-        # 2. 全サブフォルダ再帰探索（完全一致）
+    # 2. 既知拡張子なら正規化インデックス照合（NFD/NFC/NFKC・全角記号・プレフィックス違い吸収）
+    if _suffix_to_kind(suffix) is not None:
+        local_idx = build_local_output_index(podcast_name)
+        return lookup_local_output_file(local_idx, output_base, suffix)
+
+    # 3. 未知の拡張子向けフォールバック探索
+    for sfx in suffixes_to_try:
+        filename = f"{output_base}{sfx}"
         matched = [f for f in OUTPUT_DIR.rglob(filename) if f.is_file()]
         if matched:
             return matched[0]
-
-        # 3. プレフィックスの違いを吸収するタイトル後方一致探索
         for d in dirs_to_check:
             matched_wild = [f for f in d.glob(f"*_{filename}") if f.is_file()]
             if matched_wild:
                 return matched_wild[0]
-
         matched_wild_all = [f for f in OUTPUT_DIR.rglob(f"*_{filename}") if f.is_file()]
         if matched_wild_all:
             return matched_wild_all[0]
@@ -1155,6 +1314,9 @@ with tab1:
     if not episodes:
         st.info("ポッドキャストのURLを指定すると、エピソード一覧が表示されます。")
     else:
+        # ローカルの出力実ファイルを一括スキャン（NFD/NFC差異・全角記号・プレフィックス違いを吸収）
+        local_index = build_local_output_index(p_title)
+
         # エピソードごとの処理状態を判定
         table_rows = []
         for idx, ep in enumerate(episodes):
@@ -1168,10 +1330,10 @@ with tab1:
             prefix = ymd if ymd else (t_guid if t_guid else "")
             output_base = f"{prefix}_{safe_title}" if prefix else safe_title
 
-            audio_file = find_output_file(output_base, ".mp3", p_title)
+            audio_file = lookup_local_output_file(local_index, output_base, ".mp3", title_only=safe_title)
             has_audio = bool(audio_file and audio_file.exists() and audio_file.stat().st_size > 0)
-            summary_file = find_output_file(output_base, ".summary.ja.md", p_title)
-            has_summary = bool(summary_file and summary_file.exists())
+            summary_file = lookup_local_output_file(local_index, output_base, ".summary.ja.md", title_only=safe_title)
+            has_summary = bool(summary_file and summary_file.exists() and summary_file.stat().st_size > 0)
 
             table_rows.append({
                 "選択": False,
@@ -1490,24 +1652,26 @@ with tab3:
             rel_dir = f.parent.relative_to(OUTPUT_DIR)
             category = str(rel_dir).replace("\\", "/") if str(rel_dir) != "." else "（未分類）"
 
+            parsed = _split_output_suffix(name)
+            if not parsed:
+                continue
+            base, _ = parsed
+            canon_base = canonical_filename_key(base)
+            rec = grouped_records.setdefault((category, canon_base), {})
+            rec.setdefault("display_base", normalize_text(base, single_line=True))
+
             if name.endswith(".summary.ja.md"):
-                base = name[:-len(".summary.ja.md")]
-                grouped_records.setdefault((category, base), {})["ja"] = f
+                rec["ja"] = f
             elif name.endswith(".summary.ja.txt"):
-                base = name[:-len(".summary.ja.txt")]
-                grouped_records.setdefault((category, base), {})["ja"] = f
+                rec.setdefault("ja", f)
             elif name.endswith(".summary.en.md"):
-                base = name[:-len(".summary.en.md")]
-                grouped_records.setdefault((category, base), {})["en"] = f
+                rec["en"] = f
             elif name.endswith(".summary.en.txt"):
-                base = name[:-len(".summary.en.txt")]
-                grouped_records.setdefault((category, base), {})["en"] = f
+                rec.setdefault("en", f)
             elif name.endswith(".txt"):
-                base = name[:-len(".txt")]
-                grouped_records.setdefault((category, base), {})["txt"] = f
+                rec["txt"] = f
             elif name.endswith(".mp3"):
-                base = name[:-len(".mp3")]
-                grouped_records.setdefault((category, base), {})["mp3"] = f
+                rec["mp3"] = f
 
         # ポッドキャスト番組一覧で絞り込み
         all_categories = sorted(list({k[0] for k in grouped_records.keys()}))
@@ -1518,18 +1682,20 @@ with tab3:
 
         # 候補一覧の生成
         items = []
-        for (cat, base), rec in grouped_records.items():
+        for (cat, canon_base), rec in grouped_records.items():
             if selected_cat != "すべて表示" and cat != selected_cat:
                 continue
-            display_label = f"[{cat}] {base}" if selected_cat == "すべて表示" else base
-            items.append((display_label, cat, base, rec))
+            display_base = rec.get("display_base") or canon_base
+            display_label = f"[{cat}] {display_base}" if selected_cat == "すべて表示" else display_base
+            items.append((display_label, cat, display_base, rec))
 
         items.sort(key=lambda x: x[0], reverse=True)
 
         with col_srch:
             search_query = st.text_input("🔍 アーカイブを検索（タイトルやGUID、キーワード）", "")
         if search_query.strip():
-            items = [it for it in items if search_query.lower() in it[0].lower()]
+            q_norm = normalize_text(search_query, single_line=True).lower()
+            items = [it for it in items if q_norm in normalize_text(it[0], single_line=True).lower()]
 
         if not items:
             st.info("検索条件に一致するアーカイブが見つかりませんでした。")
