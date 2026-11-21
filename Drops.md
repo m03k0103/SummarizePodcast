@@ -259,7 +259,8 @@ Streamlit UI のレンダリングパフォーマンスを向上させ、大容�
 | **Drop 17** | **デザイン・品質標準化**<br>(前回完了) | **Design.md（統合デザインハーネス）準拠改修 & スモークテスト整備**<br>Slate & Blue テーマ設定、`styles.css` 外部分離、1行ステータスバー配置、NFKC/`\xa0` 正規化、`BAN-01/03/09` 是正、スモークテスト整備 | **UIデザイン統一、文字表記揺れ根絶、静的＆正規化品質ゲートの自動化** | 完了 |
 | **Drop 18** | **AIモデル最適化**<br>(前回完了) | **Gemini モデル優先順位刷新 & 50分制限ガード実装**<br>`gemini-3.8-flash` 第一選択化、非推奨 `3.5-flash` 除外、`3.5-transcribe`（50分未満限定）および `3.5-flash-lite` 導入 | **文字起こし精度向上、長尺/短尺に応じた安全フォールバック、RPD/TPM枠最適化** | 完了 |
 | **Drop 19** | **AI安定化・チャンク最適化**<br>(前回完了) | **モデル別チャンク分割サイズ動的切替 & 503 指数バックオフ強化 & 0秒表示修正**<br>一人語りチャンクをモデル別に切替（`3.5-transcribe`: 45分 / `3.6-flash` 等汎用系: 25分）、フォールバック時自動サブ分割、4秒➔8秒リトライ（計3回試行）、`format_duration(0)` 是正 | **長尺時の HTTP 503 回避、フォールバック時の上限超過防止、進捗表示の正確化** | 完了 |
-| **Drop 20** | **実態照合・データ整合**<br>(最新完了) | **ローカル Output 実態スキャン & Unicode 正規化照合対応 (NFD/NFKC/全角記号吸収)**<br>`build_local_output_index` / `canonical_filename_key` 導入、`find_output_file` 強化、タブ1一覧判定・タブ3アーカイブ統合・検索の横展開修正 | **NFD濁点分離・全角記号ファイルの100%検出（音声/要約の有無をディスク実態と完全一致）、一覧走査のO(N)化** | 完了 |
+| **Drop 20** | **実態照合・データ整合**<br>(前回完了) | **ローカル Output 実態スキャン & Unicode 正規化照合対応 (NFD/NFKC/全角記号吸収)**<br>`build_local_output_index` / `canonical_filename_key` 導入、`find_output_file` 強化、タブ1一覧判定・タブ3アーカイブ統合・検索の横展開修正 | **NFD濁点分離・全角記号ファイルの100%検出（音声/要約の有無をディスク実態と完全一致）、一覧走査のO(N)化** | 完了 |
+| **Drop 21** | **UI安定化・品質ゲート**<br>(最新完了) | **Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加**<br>タブ1処理結果プレビュー（4箇所）およびタブ3アーカイブ閲覧（4箇所）の全 `st.download_button` と `st.text_area` へ一意キーを設定し、AST 回帰テストを追加 | **要約実行直後の `StreamlitDuplicateElementId` 例外解消（衝突 0 件）** | 完了 |
 
 ---
 
@@ -434,4 +435,12 @@ URL のクエリパラメータに API キー（`?key=...`）を含めてリク�
   - **`find_output_file` 強化**: 直接完全一致にヒットしない場合、正規化インデックス照合へシームレスにフォールバックし、音声ダウンロード再利用・要約済み判定でも既存 NFD ファイルを確実に認識。
   - **タブ1 & タブ3 横展開**: エピソード一覧（タブ1）で1回のディスクスキャン結果を用いて高精度・高速に有無判定を実施。アーカイブ閲覧（タブ3）でも正規化ベース名による統合グルーピング（NFD/NFC混在時の項目分裂防止）および正規化検索を適用。
   - **検証実績**: `Output/けんすうスピーク` 内の既存ファイル全件（音声 12/12 件・要約 11/11 件）との完全一致および回帰テスト `tests/test_local_file_matching.py`（3件）PASS を確認。
+
+### 【Drop 21】Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加
+要約実行直後にタブ1（処理結果プレビュー）とタブ3（アーカイブ閲覧・最新項目自動選択）で同一ラベル・同一ファイル名・同一内容の `st.download_button` が同時に描画され、`StreamlitDuplicateElementId` 例外が発生する不具合を解消。
+
+- **実装ファイル**: `app.py`, `tests/test_design_harness.py`, `Drops.md`
+- **成果**:
+  - タブ1処理結果プレビュー（`res_dl_ja`, `res_dl_en`, `res_dl_txt`, `res_dl_mp3`, `res_transcript_area`）およびタブ3アーカイブ閲覧（`arc_dl_ja`, `arc_dl_en`, `arc_dl_txt`, `arc_dl_mp3`, `arc_transcript_area`）に一意の `key` 引数を明示設定。
+  - `tests/test_design_harness.py` に `test_all_download_buttons_have_unique_keys` を追加し、`app.py` 内の全 `st.download_button` 呼び出し（8件）に重複のない `key` 引数が設定されていることを AST 検査で自動検証。
 

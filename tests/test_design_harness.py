@@ -89,6 +89,29 @@ class TestDesignHarness(unittest.TestCase):
         for term in prohibited_terms:
             self.assertNotIn(term, app_content, f"app.py に禁止表現または非推奨コピー '{term}' が含まれています")
 
+    def test_all_download_buttons_have_unique_keys(self):
+        """app.py 内の全 st.download_button に明示的かつ一意の key 引数が設定されていることを検証"""
+        app_content = (PROJECT_ROOT / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(app_content, filename=str(PROJECT_ROOT / "app.py"))
+
+        calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "download_button"
+        ]
+        self.assertGreaterEqual(len(calls), 8, "st.download_button の呼び出し件数が想定より少ないです")
+
+        seen_literal_keys: set[str] = set()
+        for call_node in calls:
+            key_kw = next((kw for kw in call_node.keywords if kw.arg == "key"), None)
+            self.assertIsNotNone(key_kw, f"line {call_node.lineno}: st.download_button に key 引数がありません")
+            if isinstance(key_kw.value, ast.Constant) and isinstance(key_kw.value.value, str):
+                key_val = key_kw.value.value.strip()
+                self.assertTrue(key_val, f"line {call_node.lineno}: st.download_button の key が空文字です")
+                self.assertNotIn(key_val, seen_literal_keys, f"line {call_node.lineno}: key '{key_val}' が重複しています")
+                seen_literal_keys.add(key_val)
+
 
 if __name__ == "__main__":
     unittest.main()

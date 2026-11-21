@@ -1563,7 +1563,8 @@ with tab1:
                     "📥 日本語要約 (.md) をダウンロード",
                     data=result_data["ja"],
                     file_name=f"{result_data['base_name']}.summary.ja.md",
-                    mime="text/markdown"
+                    mime="text/markdown",
+                    key="res_dl_ja"
                 )
                 st.markdown(result_data["ja"])
 
@@ -1573,7 +1574,8 @@ with tab1:
                         "📥 英語要約 (.md) をダウンロード",
                         data=result_data["en"],
                         file_name=f"{result_data['base_name']}.summary.en.md",
-                        mime="text/markdown"
+                        mime="text/markdown",
+                        key="res_dl_en"
                     )
                     st.markdown(result_data["en"])
                 else:
@@ -1584,9 +1586,10 @@ with tab1:
                     "📥 文字起こしテキスト (.txt) をダウンロード",
                     data=result_data["transcript"],
                     file_name=f"{result_data['base_name']}.txt",
-                    mime="text/plain"
+                    mime="text/plain",
+                    key="res_dl_txt"
                 )
-                st.text_area("文字起こし本文", value=result_data["transcript"], height=400)
+                st.text_area("文字起こし本文", value=result_data["transcript"], height=400, key="res_transcript_area")
 
             with res_tab4:
                 p_name = result_data.get("podcast_name", "")
@@ -1594,7 +1597,7 @@ with tab1:
                 if af and af.exists():
                     st.audio(str(af))
                     with open(af, "rb") as f_bin:
-                        st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=f_bin.read(), file_name=af.name, mime="audio/mpeg")
+                        st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=f_bin.read(), file_name=af.name, mime="audio/mpeg", key="res_dl_mp3")
                 else:
                     st.caption("ローカル音声ファイルがありません")
 
@@ -1712,7 +1715,7 @@ with tab3:
                 with arc_tab1:
                     if "ja" in rec:
                         ja_c = rec["ja"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 日本語要約 (.md) をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/markdown")
+                        st.download_button("📥 日本語要約 (.md) をダウンロード", ja_c, file_name=rec["ja"].name, mime="text/markdown", key="arc_dl_ja")
                         st.markdown(ja_c)
                     else:
                         st.caption("日本語要約ファイルがありません")
@@ -1720,7 +1723,7 @@ with tab3:
                 with arc_tab2:
                     if "en" in rec:
                         en_c = rec["en"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 英語要約 (.md) をダウンロード", en_c, file_name=rec["en"].name, mime="text/markdown")
+                        st.download_button("📥 英語要約 (.md) をダウンロード", en_c, file_name=rec["en"].name, mime="text/markdown", key="arc_dl_en")
                         st.markdown(en_c)
                     else:
                         st.caption("英語要約ファイルがありません")
@@ -1728,8 +1731,8 @@ with tab3:
                 with arc_tab3:
                     if "txt" in rec:
                         txt_c = rec["txt"].read_text(encoding="utf-8", errors="ignore")
-                        st.download_button("📥 文字起こしテキストをダウンロード", txt_c, file_name=rec["txt"].name, mime="text/plain")
-                        st.text_area("全文テキスト", txt_c, height=450)
+                        st.download_button("📥 文字起こしテキストをダウンロード", txt_c, file_name=rec["txt"].name, mime="text/plain", key="arc_dl_txt")
+                        st.text_area("全文テキスト", txt_c, height=450, key="arc_transcript_area")
                     else:
                         st.caption("文字起こしファイルがありません")
 
@@ -1738,7 +1741,7 @@ with tab3:
                         mp3_f = rec["mp3"]
                         st.audio(str(mp3_f))
                         with open(mp3_f, "rb") as af:
-                            st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=af.read(), file_name=mp3_f.name, mime="audio/mpeg")
+                            st.download_button("📥 音声ファイル (.mp3) をダウンロード", data=af.read(), file_name=mp3_f.name, mime="audio/mpeg", key="arc_dl_mp3")
                     else:
                         st.caption("ローカル音声ファイルがありません")
 

@@ -124,6 +124,7 @@ class TestLocalFileMatching(unittest.TestCase):
         ns = _load_matching_helpers()
         build_idx = ns["build_local_output_index"]
         lookup = ns["lookup_local_output_file"]
+        sanitize = ns["sanitize_filename"]
 
         idx = build_idx(podcast_name="けんすうスピーク", output_root=PROJECT_ROOT / "Output")
 
@@ -138,10 +139,22 @@ class TestLocalFileMatching(unittest.TestCase):
                 self.assertIsNotNone(lookup(idx, base, ".mp3"), f"{base}.mp3 が検出されませんでした")
                 self.assertIsNotNone(lookup(idx, base, ".summary.ja.md"), f"{base}.summary.ja.md が検出されませんでした")
 
-        # MP3 のみ存在・要約なしの実在ファイル
-        audio_only_base = "20261015_「決意」の価値はさほど高くない"
-        self.assertIsNotNone(lookup(idx, audio_only_base, ".mp3"))
-        self.assertIsNone(lookup(idx, audio_only_base, ".summary.ja.md"))
+        # フォルダ内の全実在ファイル（.mp3 / .summary.ja.md）が NFKC 正規化ベース名から 100% 検出できること
+        checked_count = 0
+        for f in sorted(target_dir.iterdir()):
+            if not f.is_file() or f.stat().st_size <= 0:
+                continue
+            for suffix in (".mp3", ".summary.ja.md"):
+                if f.name.endswith(suffix):
+                    raw_base = f.name[:-len(suffix)]
+                    norm_base = sanitize(normalize_text(raw_base, single_line=True))
+                    with self.subTest(file=f.name):
+                        hit = lookup(idx, norm_base, suffix)
+                        self.assertIsNotNone(hit, f"{f.name} が正規化照合で検出されませんでした")
+                        self.assertEqual(hit.resolve(), f.resolve())
+                    checked_count += 1
+                    break
+        self.assertGreater(checked_count, 0)
 
 
 if __name__ == "__main__":
