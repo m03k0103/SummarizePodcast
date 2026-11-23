@@ -37,7 +37,7 @@ class TestGeminiApiSecurity(unittest.TestCase):
         request_arg = mock_urlopen.call_args[0][0]
 
         # Verify the URL does not contain the API key
-        self.assertEqual(request_arg.full_url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent")
+        self.assertEqual(request_arg.full_url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent")
         self.assertNotIn("key=", request_arg.full_url)
         self.assertNotIn(api_key, request_arg.full_url)
 

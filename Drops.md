@@ -14,6 +14,9 @@
 
 | Track ID | 構想テーマ | 主な対象・内容 | 到達成果・期待価値 | 優先度 | ステータス |
 |:---:|:---|:---|:---|:---:|:---:|
+| **Track [Local-File-Matching]** | **ローカル実態スキャン & Unicode正規化照合**<br>(状態判定整合・高速化) | **NFD/NFC/NFKC差異・全角記号・プレフィックス違いを吸収する一括ファイルインデックス & アーカイブ統合**<br>`build_local_output_index` / `canonical_filename_key` による `Output/` 実態照合、`find_output_file` 拡張、タブ3 NFD分裂・検索不具合解消 | **ローカル音声/要約有無の100%実態一致（けんすうスピーク 12/12・11/11 全件検出）、一覧表示高速化、アーカイブ検索改善** | 最高 | **完了 (Drop 20)** |
+| **Track [Model-Optimization]** | **Gemini モデル優先順位・フォールバック・チャンク最適化**<br>(精度・耐負荷・クォータ最適化) | **3.8-flash 第一選択化・3.5-flash 除外・モデル別動的チャンク分割 (transcribe=45分 / 3.6等=25分)・503指数バックオフ**<br>ASR 5段階順序、モデル別分割分数（`3.5-transcribe` 一人語り45分 / `3.6-flash` 等25分 / 対談15分）とフォールバック時サブ分割ガード実装 | **文字起こし精度向上、長尺推論時 HTTP 503 回避、短尺/大量処理のクォータ最適化** | 最高 | **完了 (Drop 18, Drop 19)** |
+| **Track [Design-Harness]** | **統合デザインハーネス準拠**<br>(UI標準化・品質ゲート) | **Light Slate & Blue テーマ設定 & CSS外部分離 & 1行ステータスバー & NFKC正規化 & 品質テスト**<br>`.streamlit/config.toml` / `styles.css` 導入、テーブル直上1行ステータスバー配置、NFKC・` ` クレンジング、`BAN-01/03/09` 是正、スモークテスト整備 | **全プロジェクト横断のデザイン一貫性、文字表記揺れ根絶、品質ゲートの自動化** | 高 | **完了 (Drop 17)** |
 | **Track [UX-Unification]** | **エピソード一覧の表形式統合 & 状態確認**<br>(タブ集約・操作性刷新) | **3タブ（最新・個別・一括）の単一テーブル統合 & 音声・要約ステータス確認 & 音声DLのみ/要約実行機能**<br>エピソード一覧を表形式で可視化、音声/要約の処理状況表示、チェックボックス選択による音声DLのみ・要約実行の一元化 | **タブ行き来の解消、直感的なステータス把握、操作性の大幅向上** | 最高 | **完了 (Drop 14)** |
 | **Track [Data-Naming]** | **ファイル名の日付プレフィックス化 & 要約の .md 化**<br>(命名規約・既存更新) | **出力ファイル名の GUID 排除 & 公開日 `YYYYMMDD` 統一 & 要約ファイル拡張子 `.md` 化 & 既存データ全件移行**<br>`{YYYYMMDD}_{タイトル}` 命名、要約の `.summary.*.md` 刷新、全エピソードの安全なマイグレーション | **ファイル一覧の時系列・日付視認性向上、Markdown対応、直感的なファイル管理** | 高 | **完了 (Drop 10, Drop 13)** |
 | **Track [Storage-Organization]** | **ポッドキャスト別フォルダ自動分類**<br>(Output整理・マイグレーション) | **番組ごとの Output サブフォルダ保存 & アーカイブ絞り込み & 既存ファイル移行**<br>`Output/{番組名}/` への自動分類保存、完全な後方互換透過検索、タブ5の番組フィルタ、既存ファイルの安全マイグレーション | **ファイル一覧の視認性向上、番組ごとの整理、過去資産の完全保護** | 高 | **完了 (Drop 8)** |
@@ -27,6 +30,24 @@
 ---
 
 ## 2. 各Trackの詳細
+
+### 【Track: Design-Harness】統合デザインハーネス (Design.md) 準拠改修
+
+`D:\dev\Orchestration\Design.md` および `GLOBAL_RULES.md` §6 に準拠し、Slate & Blue トークン化、スタイル外部ファイル分離、高密度1行ステータスバー、テキスト NFKC 正規化、客観的コピートーン化、および Design Quality Gate スモークテストを整備。
+
+- **改善スコープ**:
+  1. `.streamlit/config.toml` に Light ベースの Slate & Blue パレット（`#2563eb`, `#f8fafc`, `#f1f5f9`, `#0f172a`）を設定。
+  2. `app.py` 内のインライン `<style>`・`style="..."` を `styles.css` へ一本化し、過度な装飾や冗長な説明文（`BAN-01`）を削減。
+  3. エピソード一覧テーブル（`st.data_editor`）直上に「全エピソード数 / 音声DL済 / 要約済」の1行ステータスバー（`.status-strip`）を配置。
+  4. `Source/download_and_summarize_podcast.py` に `normalize_text`（NFKC 正規化・`\xa0` 除去）を実装し、フィード取得タイトルおよび生成要約へ適用。
+  5. UI ラベルの曖昧な中黒併記（`BAN-03`）や主観的誇張表現を排除し、`tests/test_design_harness.py` で継続検証。
+
+| ID | 分類 | 内容 | 対象ファイル | 状態 |
+|:---|:---:|:---|:---|:---:|
+| **TS-27** | テーマ・CSS分離 | **`.streamlit/config.toml` Slate & Blue 設定 & `styles.css` 外部一本化**<br>インラインCSS撤廃、1行ステータスバー（`.status-strip`）配置、`BAN-01/09` 解消 | `.streamlit/config.toml`<br>`styles.css`, `app.py` | 完了 (Drop 17) |
+| **TS-28** | 正規化・品質ゲート | **NFKC/空白クレンジング適用 & Design Quality Gate スモークテスト整備**<br>`normalize_text()` のフィード・要約適用、`BAN-03`・誇張表現排除、自動検査実装 | `Source/download_and_summarize_podcast.py`<br>`tests/test_design_harness.py` | 完了 (Drop 17) |
+
+---
 
 ### 【Track: UX-Unification】エピソード一覧の表形式統合 & 音声・要約ステータス確認 & 実行機能
 
@@ -234,7 +255,13 @@ Streamlit UI のレンダリングパフォーマンスを向上させ、大容�
 | **Drop 12** | **UX・柔軟性向上**<br>(前回完了) | **ポッドキャストごとの標準出演者構成設定 & エピソード個別指定連動**<br>番組ごとに標準の出演者構成（複数人/単独）を `saved_podcasts.json` に保存・自動保持。要約実行時に初期選択されるとともに、対談回等のエピソード単位の個別変更に完全対応 | **番組ごとのデフォルト構成自動化、操作ステップの削減、個別回の柔軟な切替両立** | 完了 |
 | **Drop 13** | **データ形式刷新**<br>(前回完了) | **要約（サマリー）ファイルの拡張子 `.md` 化 & 既存ファイル全件マイグレーション**<br>今後出力される日本語・英語要約を `.summary.ja.md`, `.summary.en.md` に刷新。既存の全39要約ファイルを安全に `.md` へ一括移行、透過的フォールバック探索配備 | **Markdown ビューア親和性向上、GitHub・エディタでのプレビュー最適化、既存資産100%保護** | 完了 |
 | **Drop 14** | **UX・操作性統合**<br>(前回完了) | **エピソード一覧の表形式統合 & 音声・要約ステータス確認 & 実行機能**<br>3つのタブ（最新・個別・一括）を「📋 エピソード一覧 & 要約処理」へ完全集約。表形式での音声/要約ステータス可視化、チェックボックス選択による「音声DLのみ」および「要約実行」の柔軟な操作体系を実現 | **タブ分散の解消、直感的なステータス把握、音声のみ保存の対応、操作動線の最適化** | 完了 |
-| **Drop 15** | **効率化・リソース保護**<br>(最新完了) | **日本語ポッドキャストにおける英語サマリ作成のスキップ & 言語設定保持**<br>日本語番組では不要な英語サマリファイル（`.summary.en.md`）の作成およびLLM呼び出しを完全スキップ。番組言語の自動判定・設定保持UIを配備 | **要約API消費50%削減（リクエスト数半減）、処理時間短縮、無料枠の大幅節約** | 完了 |
+| **Drop 15** | **効率化・リソース保護**<br>(前回完了) | **日本語ポッドキャストにおける英語サマリ作成のスキップ & 言語設定保持**<br>日本語番組では不要な英語サマリファイル（`.summary.en.md`）の作成およびLLM呼び出しを完全スキップ。番組言語の自動判定・設定保持UIを配備 | **要約API消費50%削減（リクエスト数半減）、処理時間短縮、無料枠の大幅節約** | 完了 |
+| **Drop 17** | **デザイン・品質標準化**<br>(前回完了) | **Design.md（統合デザインハーネス）準拠改修 & スモークテスト整備**<br>Slate & Blue テーマ設定、`styles.css` 外部分離、1行ステータスバー配置、NFKC/`\xa0` 正規化、`BAN-01/03/09` 是正、スモークテスト整備 | **UIデザイン統一、文字表記揺れ根絶、静的＆正規化品質ゲートの自動化** | 完了 |
+| **Drop 18** | **AIモデル最適化**<br>(前回完了) | **Gemini モデル優先順位刷新 & 50分制限ガード実装**<br>`gemini-3.8-flash` 第一選択化、非推奨 `3.5-flash` 除外、`3.5-transcribe`（50分未満限定）および `3.5-flash-lite` 導入 | **文字起こし精度向上、長尺/短尺に応じた安全フォールバック、RPD/TPM枠最適化** | 完了 |
+| **Drop 19** | **AI安定化・チャンク最適化**<br>(前回完了) | **モデル別チャンク分割サイズ動的切替 & 503 指数バックオフ強化 & 0秒表示修正**<br>一人語りチャンクをモデル別に切替（`3.5-transcribe`: 45分 / `3.6-flash` 等汎用系: 25分）、フォールバック時自動サブ分割、4秒➔8秒リトライ（計3回試行）、`format_duration(0)` 是正 | **長尺時の HTTP 503 回避、フォールバック時の上限超過防止、進捗表示の正確化** | 完了 |
+| **Drop 20** | **実態照合・データ整合**<br>(前回完了) | **ローカル Output 実態スキャン & Unicode 正規化照合対応 (NFD/NFKC/全角記号吸収)**<br>`build_local_output_index` / `canonical_filename_key` 導入、`find_output_file` 強化、タブ1一覧判定・タブ3アーカイブ統合・検索の横展開修正 | **NFD濁点分離・全角記号ファイルの100%検出（音声/要約の有無をディスク実態と完全一致）、一覧走査のO(N)化** | 完了 |
+| **Drop 21** | **UI安定化・品質ゲート**<br>(前回完了) | **Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加**<br>タブ1処理結果プレビュー（4箇所）およびタブ3アーカイブ閲覧（4箇所）の全 `st.download_button` と `st.text_area` へ一意キーを設定し、AST 回帰テストを追加 | **要約実行直後の `StreamlitDuplicateElementId` 例外解消（衝突 0 件）** | 完了 |
+| **Drop 22** | **UI操作性・状態管理修正**<br>(最新完了) | **`st.data_editor` 入力書き戻し廃止・バージョン付きキー管理による1回目クリック即実行対応**<br>手動選択時の `select_state_key` 書き戻しを削除、クイック選択連動バージョンキーと実行ボタン一意 `key` 設定、`st.rerun()` 実行条件見直し、AppTest 回帰テスト整備 | **チェックボックス選択後の初回クリック空振り解消（1回目でダウンロード・文字起こし実行）** | 完了 |
 
 ---
 
@@ -369,3 +396,62 @@ URL のクエリパラメータに API キー（`?key=...`）を含めてリク�
   3. 言語判定関数 `is_japanese_podcast` を実装し、日本語ポッドキャストでは `generate_english_summary` の呼び出しおよび `.summary.en.md` のファイル作成を完全スキップ。
   4. 要約生成にかかる LLM API リクエスト数およびトークン消費を 50% 削減（1回に集約）し、無料枠（20回/日）の消費を大幅抑制。
   5. UI の結果表示およびアーカイブ閲覧において、英語サマリがスキップされた旨を明快に案内。
+
+### 【Drop 17】Design.md（統合デザインハーネス）準拠改修 & スモークテスト整備
+`D:\dev\Orchestration\Design.md` および `GLOBAL_RULES.md` §6 に準拠し、UI テーマ・スタイル分離・情報密度・文字正規化・客観的コピートーン・自動品質ゲートを一括整備。
+
+- **実装ファイル**: `.streamlit/config.toml`, `styles.css`, `app.py`, `Source/download_and_summarize_podcast.py`, `tests/test_design_harness.py`
+- **成果**:
+  - `.streamlit/config.toml` に Light ベースの Slate & Blue パレット（`#2563eb`, `#f8fafc`, `#f1f5f9`, `#0f172a`）を設定。
+  - `app.py` 内のインライン CSS を `styles.css` に完全分離し、HTML メタデータカードへ `html.escape()` を適用。
+  - エピソード一覧表直上に「全エピソード / 音声DL済 / 要約済」の1行ステータスバー（`.status-strip`）を実装。
+  - `normalize_text()` による NFKC 正規化および `\xa0` クレンジングを RSS フィード・要約生成出力に適用。
+  - `BAN-01/03/09` および主観的誇張表現を排除し、`tests/test_design_harness.py`（5テスト全件PASS）を整備。
+
+### 【Drop 18】Gemini モデル優先順位刷新 & 50分制限ガード実装
+非推奨（内部転送対象）となった `gemini-3.5-flash` を全選択肢・フォールバックから除外し、精度・安定性・無料枠クォータに応じた5段階の優先順位へ刷新。
+
+- **実装ファイル**: `app.py`, `Source/download_and_summarize_podcast.py`, `AGENTS.md`, `test_gemini_api.py`, `tests/test_gemini_models.py`
+- **成果**:
+  - **ASR 優先順位**: ① `gemini-3.8-flash` ➔ ② `gemini-3.6-flash` ➔ ③ `gemini-3.5-transcribe`（音声尺 50分 / 3,000秒未満限定） ➔ ④ `gemini-3.5-flash-lite` ➔ ⑤ `gemini-3.1-flash-lite`
+  - **要約 LLM 優先順位**: ① `gemini-3.8-flash` ➔ ② `gemini-3.6-flash` ➔ ③ `gemini-3.5-flash-lite` ➔ ④ `gemini-3.1-flash-lite`
+  - `build_asr_candidate_models` による 50分未満ガードを実装し、`tests/test_gemini_models.py` にて全件自動検証済み。
+
+### 【Drop 19】モデル別チャンク分割サイズ動的切替 & 503 指数バックオフ強化 & 0秒表示修正
+長尺一人語り音声における `gemini-3.6-flash` 等の HTTP 503 (UNAVAILABLE) 発生を抑制しつつ、`gemini-3.5-transcribe` では 45分チャンクを維持できるよう、モデル別の動的チャンク分割サイズ決定ロジックと耐障害強化を実装。
+
+- **実装ファイル**: `app.py`, `tests/test_gemini_models.py`, `AGENTS.md`, `Drops.md`
+- **成果**:
+  - **モデル別分割サイズ**: `get_chunk_minutes_for_model()` を導入し、一人語り時は `gemini-3.5-transcribe` = **45分**、`gemini-3.6-flash` / `gemini-3.8-flash` / `flash-lite` 系 = **25分**、複数人対談時は全モデル **15分** へ動的設定。
+  - **フォールバック時サブ分割ガード**: `needs_fallback_resplit()` により、45分チャンクで開始後に 25分基準モデルへフォールバックした際は自動で 25分単位へサブ分割（タイムスタンプの二重加算防止処理付き）。
+  - **503 / 429 指数バックオフ**: 再試行間隔を従来の 3秒固定×1回（計2回）から `4秒 ➔ 8秒`（計3回試行）へ強化。
+  - **`format_duration` 是正**: パート開始位置の `0` 秒が `不明` と表示される不具合を `allow_zero=True` 指定により `0分00秒` へ修正。
+
+### 【Drop 20】ローカル Output 実態スキャン & Unicode 正規化照合対応 (NFD/NFKC/全角記号吸収)
+`Output\けんすうスピーク` 等の既存ファイル名に多く含まれる NFD（濁点分離文字）および全角記号（`？`, `！`）と、NFKC 正規化済みフィードタイトルとの不一致によって「音声データ / 要約データ」の有無が実態より少なく「⏳ 未」表示になっていた不具合を解消。
+
+- **実装ファイル**: `app.py`, `tests/test_local_file_matching.py`, `Drops.md`
+- **成果**:
+  - **Unicode 正規化キー & インデックス**: `canonical_filename_key()`, `strip_episode_prefix()`, `build_local_output_index()`, `lookup_local_output_file()` を新設し、NFD/NFC/NFKC 差異・全角記号・大文字小文字・日付/UUID プレフィックス違いを完全吸収（0バイト空ファイルは未済扱いとして除外、`.md` を `.txt` より優先）。
+  - **`find_output_file` 強化**: 直接完全一致にヒットしない場合、正規化インデックス照合へシームレスにフォールバックし、音声ダウンロード再利用・要約済み判定でも既存 NFD ファイルを確実に認識。
+  - **タブ1 & タブ3 横展開**: エピソード一覧（タブ1）で1回のディスクスキャン結果を用いて高精度・高速に有無判定を実施。アーカイブ閲覧（タブ3）でも正規化ベース名による統合グルーピング（NFD/NFC混在時の項目分裂防止）および正規化検索を適用。
+  - **検証実績**: `Output/けんすうスピーク` 内の既存ファイル全件（音声 12/12 件・要約 11/11 件）との完全一致および回帰テスト `tests/test_local_file_matching.py`（3件）PASS を確認。
+
+### 【Drop 21】Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加
+要約実行直後にタブ1（処理結果プレビュー）とタブ3（アーカイブ閲覧・最新項目自動選択）で同一ラベル・同一ファイル名・同一内容の `st.download_button` が同時に描画され、`StreamlitDuplicateElementId` 例外が発生する不具合を解消。
+
+- **実装ファイル**: `app.py`, `tests/test_design_harness.py`, `Drops.md`
+- **成果**:
+  - タブ1処理結果プレビュー（`res_dl_ja`, `res_dl_en`, `res_dl_txt`, `res_dl_mp3`, `res_transcript_area`）およびタブ3アーカイブ閲覧（`arc_dl_ja`, `arc_dl_en`, `arc_dl_txt`, `arc_dl_mp3`, `arc_transcript_area`）に一意の `key` 引数を明示設定。
+  - `tests/test_design_harness.py` に `test_all_download_buttons_have_unique_keys` を追加し、`app.py` 内の全 `st.download_button` 呼び出し（8件）に重複のない `key` 引数が設定されていることを AST 検査で自動検証。
+
+### 【Drop 22】`st.data_editor` 入力書き戻し廃止・バージョン付きキー管理による1回目クリック即実行対応
+エピソード一覧表（`st.data_editor`）でチェックボックスを選択した直後に「選択エピソードの要約を実行」ボタンを1回目にクリックした際、内部編集状態の再同期により実行が空振りし、2回目のクリックが必要になっていた不具合を修正。
+
+- **実装ファイル**: `app.py`, `tests/test_ui_selection_flow.py`, `Drops.md`
+- **成果**:
+  - **入力 DataFrame 書き戻し廃止**: 手動編集時の `st.session_state[select_state_key]` 上書きを削除し、`st.data_editor` の編集状態を維持したまま1回目クリックで処理を即時開始可能化。
+  - **バージョン付きキー管理 & 一意 `key` 明示**: クイック選択 4 ボタン（`q_latest_*`, `q_unproc_*`, `q_all_*`, `q_clear_*`）押下時のみ `editor_ver_key` をインクリメントして選択反映し、`btn_audio_only_*` / `btn_summarize_*` に一意キーを付与。
+  - **`st.rerun()` 条件見直し**: 全件スキップまたはエラーのみ発生時（`success_count == 0` / `dl_count == 0`）に無条件 `st.rerun()` を行わず、`st.status` の詳細ログが消えないように改善。
+  - **回帰テスト整備**: `tests/test_ui_selection_flow.py`（3件）を新設し、`AppTest` による手動選択・クイック選択それぞれの1回目クリック発火を確認。
+
