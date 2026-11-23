@@ -1355,32 +1355,39 @@ with tab1:
         
         # 選択状態のセッションキー管理
         select_state_key = f"selected_rows_{podcast_key}"
+        editor_ver_key = f"ep_editor_ver_{podcast_key}"
         if select_state_key not in st.session_state:
             st.session_state[select_state_key] = [False] * len(episodes)
         elif len(st.session_state[select_state_key]) != len(episodes):
             st.session_state[select_state_key] = [False] * len(episodes)
+        if editor_ver_key not in st.session_state:
+            st.session_state[editor_ver_key] = 0
 
         with col_q1:
-            if st.button("🆕 最新回を選択", use_container_width=True):
+            if st.button("🆕 最新回を選択", key=f"q_latest_{podcast_key}", use_container_width=True):
                 new_state = [False] * len(episodes)
                 if new_state:
                     new_state[0] = True
                 st.session_state[select_state_key] = new_state
+                st.session_state[editor_ver_key] += 1
                 st.rerun()
 
         with col_q2:
-            if st.button("⚡ 未処理を選択", use_container_width=True):
+            if st.button("⚡ 未処理を選択", key=f"q_unproc_{podcast_key}", use_container_width=True):
                 st.session_state[select_state_key] = [not row["_has_summary"] for row in table_rows]
+                st.session_state[editor_ver_key] += 1
                 st.rerun()
 
         with col_q3:
-            if st.button("☑️ 全選択", use_container_width=True):
+            if st.button("☑️ 全選択", key=f"q_all_{podcast_key}", use_container_width=True):
                 st.session_state[select_state_key] = [True] * len(episodes)
+                st.session_state[editor_ver_key] += 1
                 st.rerun()
 
         with col_q4:
-            if st.button("⬜ 全解除", use_container_width=True):
+            if st.button("⬜ 全解除", key=f"q_clear_{podcast_key}", use_container_width=True):
                 st.session_state[select_state_key] = [False] * len(episodes)
+                st.session_state[editor_ver_key] += 1
                 st.rerun()
 
         # セッションの選択状態を DataFrame に適用
@@ -1415,12 +1422,11 @@ with tab1:
                 "_idx": None  # 非表示
             },
             use_container_width=True,
-            key=f"ep_editor_{podcast_key}"
+            key=f"ep_editor_{podcast_key}_{st.session_state[editor_ver_key]}"
         )
 
-        # 現在選択されているインデックスを取得
+        # 現在選択されているインデックスを取得（手動編集時は入力DataFrameを書き戻さず編集状態を維持）
         selected_indices = edited_df[edited_df["選択"] == True]["_idx"].tolist()
-        st.session_state[select_state_key] = edited_df["選択"].tolist()
 
         # 実行設定 & アクションバー
         st.markdown("---")
@@ -1446,6 +1452,7 @@ with tab1:
         with col_act1:
             btn_audio_only = st.button(
                 "📥 選択エピソードの音声をダウンロードのみ実行",
+                key=f"btn_audio_only_{podcast_key}",
                 disabled=len(selected_indices) == 0,
                 use_container_width=True,
                 help="音声ファイル（.mp3）のみを取得・保存します。Gemini API などの要約クォータを一切消費しません。"
@@ -1453,6 +1460,7 @@ with tab1:
         with col_act2:
             btn_summarize = st.button(
                 "🚀 選択エピソードの要約を実行",
+                key=f"btn_summarize_{podcast_key}",
                 type="primary",
                 disabled=len(selected_indices) == 0,
                 use_container_width=True,
@@ -1489,13 +1497,15 @@ with tab1:
                         st.error(f"  ❌ 取得失敗: {e}")
                 status.update(label=f"🎉 音声ダウンロード完了！（新規保存: {dl_count} 件, 既存利用: {reuse_count} 件）", state="complete")
                 st.toast(f"📥 音声保存完了: 新規 {dl_count} 件 / 既存 {reuse_count} 件", icon="✅")
-                st.rerun()
+                if dl_count > 0:
+                    st.rerun()
 
         # アクション 2: 要約実行
         if btn_summarize:
             with st.status(f"選択された {len(selected_indices)} 件の要約処理を実行中...", expanded=True) as status:
                 success_count = 0
                 skip_count = 0
+                error_count = 0
                 last_result_summary = None
 
                 for rank, s_idx in enumerate(selected_indices, start=1):
@@ -1543,13 +1553,16 @@ with tab1:
                             "podcast_name": p_title
                         }
                     except Exception as e:
+                        error_count += 1
                         st.error(f"❌ エピソード「{t_title}」の処理中にエラーが発生しました: {e}")
 
-                status.update(label=f"🎉 要約処理完了！（成功: {success_count} 件, スキップ: {skip_count} 件）", state="complete")
+                status_state = "error" if (error_count > 0 and success_count == 0) else "complete"
+                status.update(label=f"🎉 要約処理完了！（成功: {success_count} 件, スキップ: {skip_count} 件, エラー: {error_count} 件）", state=status_state)
                 if last_result_summary:
                     st.session_state["last_result"] = last_result_summary
-                st.balloons()
-                st.rerun()
+                if success_count > 0:
+                    st.balloons()
+                    st.rerun()
 
         # 直前の要約結果表示（単一エピソード処理後または選択時）
         result_data = st.session_state.get("last_result")

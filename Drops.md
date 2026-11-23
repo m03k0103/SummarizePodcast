@@ -260,7 +260,8 @@ Streamlit UI のレンダリングパフォーマンスを向上させ、大容�
 | **Drop 18** | **AIモデル最適化**<br>(前回完了) | **Gemini モデル優先順位刷新 & 50分制限ガード実装**<br>`gemini-3.8-flash` 第一選択化、非推奨 `3.5-flash` 除外、`3.5-transcribe`（50分未満限定）および `3.5-flash-lite` 導入 | **文字起こし精度向上、長尺/短尺に応じた安全フォールバック、RPD/TPM枠最適化** | 完了 |
 | **Drop 19** | **AI安定化・チャンク最適化**<br>(前回完了) | **モデル別チャンク分割サイズ動的切替 & 503 指数バックオフ強化 & 0秒表示修正**<br>一人語りチャンクをモデル別に切替（`3.5-transcribe`: 45分 / `3.6-flash` 等汎用系: 25分）、フォールバック時自動サブ分割、4秒➔8秒リトライ（計3回試行）、`format_duration(0)` 是正 | **長尺時の HTTP 503 回避、フォールバック時の上限超過防止、進捗表示の正確化** | 完了 |
 | **Drop 20** | **実態照合・データ整合**<br>(前回完了) | **ローカル Output 実態スキャン & Unicode 正規化照合対応 (NFD/NFKC/全角記号吸収)**<br>`build_local_output_index` / `canonical_filename_key` 導入、`find_output_file` 強化、タブ1一覧判定・タブ3アーカイブ統合・検索の横展開修正 | **NFD濁点分離・全角記号ファイルの100%検出（音声/要約の有無をディスク実態と完全一致）、一覧走査のO(N)化** | 完了 |
-| **Drop 21** | **UI安定化・品質ゲート**<br>(最新完了) | **Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加**<br>タブ1処理結果プレビュー（4箇所）およびタブ3アーカイブ閲覧（4箇所）の全 `st.download_button` と `st.text_area` へ一意キーを設定し、AST 回帰テストを追加 | **要約実行直後の `StreamlitDuplicateElementId` 例外解消（衝突 0 件）** | 完了 |
+| **Drop 21** | **UI安定化・品質ゲート**<br>(前回完了) | **Streamlit `download_button` / `text_area` の一意 `key` 明示化 & AST 重複防止テスト追加**<br>タブ1処理結果プレビュー（4箇所）およびタブ3アーカイブ閲覧（4箇所）の全 `st.download_button` と `st.text_area` へ一意キーを設定し、AST 回帰テストを追加 | **要約実行直後の `StreamlitDuplicateElementId` 例外解消（衝突 0 件）** | 完了 |
+| **Drop 22** | **UI操作性・状態管理修正**<br>(最新完了) | **`st.data_editor` 入力書き戻し廃止・バージョン付きキー管理による1回目クリック即実行対応**<br>手動選択時の `select_state_key` 書き戻しを削除、クイック選択連動バージョンキーと実行ボタン一意 `key` 設定、`st.rerun()` 実行条件見直し、AppTest 回帰テスト整備 | **チェックボックス選択後の初回クリック空振り解消（1回目でダウンロード・文字起こし実行）** | 完了 |
 
 ---
 
@@ -443,4 +444,14 @@ URL のクエリパラメータに API キー（`?key=...`）を含めてリク�
 - **成果**:
   - タブ1処理結果プレビュー（`res_dl_ja`, `res_dl_en`, `res_dl_txt`, `res_dl_mp3`, `res_transcript_area`）およびタブ3アーカイブ閲覧（`arc_dl_ja`, `arc_dl_en`, `arc_dl_txt`, `arc_dl_mp3`, `arc_transcript_area`）に一意の `key` 引数を明示設定。
   - `tests/test_design_harness.py` に `test_all_download_buttons_have_unique_keys` を追加し、`app.py` 内の全 `st.download_button` 呼び出し（8件）に重複のない `key` 引数が設定されていることを AST 検査で自動検証。
+
+### 【Drop 22】`st.data_editor` 入力書き戻し廃止・バージョン付きキー管理による1回目クリック即実行対応
+エピソード一覧表（`st.data_editor`）でチェックボックスを選択した直後に「選択エピソードの要約を実行」ボタンを1回目にクリックした際、内部編集状態の再同期により実行が空振りし、2回目のクリックが必要になっていた不具合を修正。
+
+- **実装ファイル**: `app.py`, `tests/test_ui_selection_flow.py`, `Drops.md`
+- **成果**:
+  - **入力 DataFrame 書き戻し廃止**: 手動編集時の `st.session_state[select_state_key]` 上書きを削除し、`st.data_editor` の編集状態を維持したまま1回目クリックで処理を即時開始可能化。
+  - **バージョン付きキー管理 & 一意 `key` 明示**: クイック選択 4 ボタン（`q_latest_*`, `q_unproc_*`, `q_all_*`, `q_clear_*`）押下時のみ `editor_ver_key` をインクリメントして選択反映し、`btn_audio_only_*` / `btn_summarize_*` に一意キーを付与。
+  - **`st.rerun()` 条件見直し**: 全件スキップまたはエラーのみ発生時（`success_count == 0` / `dl_count == 0`）に無条件 `st.rerun()` を行わず、`st.status` の詳細ログが消えないように改善。
+  - **回帰テスト整備**: `tests/test_ui_selection_flow.py`（3件）を新設し、`AppTest` による手動選択・クイック選択それぞれの1回目クリック発火を確認。
 
